@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Runs — AutoTube AI{% endblock %}
+{% block content %}
+  <h3>Awaiting your approval ({{ pending|length }})</h3>
+  {% if not pending %}
+    <p><em>Nothing pending review.</em></p>
+  {% else %}
+  <table>
+    <tr><th>Run</th><th>Topic</th><th>Status</th><th></th></tr>
+    {% for run in pending %}
+    <tr>
+      <td><code>{{ run.id }}</code></td>
+      <td>{{ (run.selected_topic or {}).get("title", "—") }}</td>
+      <td><span class="badge badge-{{ run.status.value }}">{{ run.status.value }}</span></td>
+      <td><a href="/dashboard/{{ run.id }}">Review →</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+
+  <h3>Recent runs</h3>
+  <table>
+    <tr><th>Run</th><th>Topic</th><th>Status</th><th>Created</th></tr>
+    {% for run in recent %}
+    <tr>
+      <td><code>{{ run.id }}</code></td>
+      <td>{{ (run.selected_topic or {}).get("title", "—") }}</td>
+      <td><span class="badge badge-{{ run.status.value }}">{{ run.status.value }}</span></td>
+      <td>{{ run.created_at }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+{% endblock %}

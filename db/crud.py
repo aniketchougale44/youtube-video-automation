@@ -1,0 +1,142 @@
+"""Thin persistence helpers shared by the API layer and the Celery worker tasks. Keeps
+Run/AgentLog/Video bookkeeping out of the graph nodes themselves (the graph only knows about
+PipelineState; SQLAlchemy rows are an outer concern owned by worker/tasks.py)."""
+import uuid
+from datetime import UTC, datetime
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from agents.schemas.common import PipelineStage, RunStatus
+from db.models import AgentLog, PerformanceSnapshot, Run, Video
+
+CRITIC_STAGE_PREFIXES = ("critic_",)
+
+
+def create_run(db: Session, debug_force_reject: dict | None = None) -> Run:
+    run = Run(
+        id=uuid.uuid4(),
+        status=RunStatus.PENDING,
+        langgraph_thread_id=str(uuid.uuid4()),
+        stage_status={"debug_force_reject": debug_force_reject or {}},
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+def get_run(db: Session, run_id: uuid.UUID) -> Run | None:
+    return db.get(Run, run_id)
+
+
+def list_runs(db: Session, status: RunStatus | None = None, limit: int = 50) -> list[Run]:
+    stmt = select(Run).order_by(Run.created_at.desc()).limit(limit)
+    if status is not None:
+        stmt = stmt.where(Run.status == status)
+    return list(db.execute(stmt).scalars())
+
+
+def summarize_recent_performance(db: Session, limit: int = 5) -> str:
+    """Human-readable digest of the most recent performance snapshots, fed into the Strategy
+    Agent's prompt so it can weigh past results rather than deciding blind every run."""
+    stmt = (
+        select(PerformanceSnapshot, Video)
+        .join(Video, PerformanceSnapshot.video_id == Video.id)
+        .order_by(PerformanceSnapshot.captured_at.desc())
+        .limit(limit)
+    )
+    rows = db.execute(stmt).all()
+    if not rows:
+        return "No prior performance data available yet."
+
+    lines = [
+        f"- \"{video.title}\" ({snapshot.window}): {snapshot.views} views, "
+        f"{snapshot.ctr:.1%} CTR, {snapshot.retention_pct:.0f}% retention"
+        for snapshot, video in rows
+    ]
+    return "Recent video performance:\n" + "\n".join(lines)
+
+
+def persist_trace_as_agent_logs(db: Session, run_id: uuid.UUID, trace: list[dict]) -> None:
+    """Best-effort mapping of graph trace events -> AgentLog rows. One row per event; real
+    input/output payloads get attached once each node's real logic (not the stub) is wired in."""
+    for evt in trace:
+        stage_name = evt.get("stage", "unknown")
+        try:
+            stage_enum = PipelineStage(stage_name)
+        except ValueError:
+            continue  # non-pipeline trace events (e.g. "escalation", "human_approval" sub-events)
+        db.add(
+            AgentLog(
+                run_id=run_id,
+                stage=stage_enum,
+                agent_name=stage_name,
+                output_json=evt,
+                is_critic=stage_name.startswith(CRITIC_STAGE_PREFIXES),
+                created_at=datetime.now(UTC),
+            )
+        )
+    db.commit()
+
+
+def update_run_from_graph_result(db: Session, run: Run, result: dict, interrupted: bool) -> Run:
+    run.stage_status = {**(run.stage_status or {}), "retry_counts": result.get("retry_counts", {})}
+
+    if interrupted:
+        run.status = RunStatus.AWAITING_APPROVAL
+        run.current_stage = PipelineStage.HUMAN_APPROVAL
+    elif result.get("escalated"):
+        run.status = RunStatus.ESCALATED
+        run.error = result.get("escalation_reason")
+    elif result.get("upload_result"):
+        run.status = RunStatus.PUBLISHED
+        run.current_stage = PipelineStage.UPLOAD
+    elif result.get("approval_decision") and not result["approval_decision"].get("approved"):
+        run.status = RunStatus.REJECTED
+    else:
+        run.status = RunStatus.RUNNING
+
+    if result.get("strategy_decision"):
+        run.selected_topic = result["strategy_decision"].get("selected_topic")
+        run.content_type = result["strategy_decision"].get("content_type")
+        run.content_format = result["strategy_decision"].get("content_format")
+        run.strategy_rationale = result["strategy_decision"].get("rationale")
+
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+    if result.get("upload_result") or result.get("assembly_output"):
+        _upsert_video(db, run, result)
+
+    return run
+
+
+def _upsert_video(db: Session, run: Run, result: dict) -> Video:
+    video = db.execute(select(Video).where(Video.run_id == run.id)).scalar_one_or_none()
+    if video is None:
+        video = Video(id=uuid.uuid4(), run_id=run.id)
+
+    metadata = result.get("metadata_output") or {}
+    assembly = result.get("assembly_output") or {}
+    upload = result.get("upload_result") or {}
+    thumbnails = result.get("thumbnail_output") or {}
+
+    video.title = metadata.get("selected_title", video.title)
+    video.description = metadata.get("description", video.description)
+    video.tags = metadata.get("tags", video.tags)
+    video.script_json = result.get("script_output", video.script_json)
+    video.render_path = assembly.get("render_path", video.render_path)
+    video.duration_seconds = assembly.get("duration_seconds", video.duration_seconds)
+    if thumbnails.get("candidates"):
+        video.thumbnail_path = thumbnails["candidates"][0].get("image_path")
+    if upload.get("youtube_video_id"):
+        video.youtube_video_id = upload["youtube_video_id"]
+        video.visibility = upload.get("visibility")
+        video.published_at = datetime.now(UTC)
+
+    db.add(video)
+    db.commit()
+    db.refresh(video)
+    return video
