@@ -3,11 +3,17 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg \
+# Split into two layers: the small one (curl/libpq-dev/build-essential) caches independently of
+# ffmpeg's much larger dependency tree, so an interrupted build (flaky network, Docker Desktop
+# restart mid-pull) doesn't force a full re-download of everything on retry.
+RUN apt-get update -o Acquire::Retries=5 && apt-get install -y -o Acquire::Retries=5 --no-install-recommends \
         build-essential \
         libpq-dev \
         curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update -o Acquire::Retries=5 && apt-get install -y -o Acquire::Retries=5 --no-install-recommends \
+        ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml alembic.ini ./

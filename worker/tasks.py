@@ -29,6 +29,8 @@ def run_pipeline_task(self, run_id: str) -> dict:
 
         debug_force_reject = (run.stage_status or {}).get("debug_force_reject", {})
         past_performance_summary = summarize_recent_performance(db)
+        db.commit()  # release the read transaction — postgres_checkpointer() runs DDL (CREATE
+        # INDEX CONCURRENTLY) on a separate connection that would otherwise block waiting on it
 
         with postgres_checkpointer() as checkpointer:
             _thread_id, result = start_run(
@@ -58,6 +60,7 @@ def resume_pipeline_task(self, run_id: str, decision: dict) -> dict:
         run = get_run(db, uuid.UUID(run_id))
         if run is None:
             raise ValueError(f"Run {run_id} not found")
+        db.commit()  # release the read transaction before postgres_checkpointer()'s DDL runs
 
         with postgres_checkpointer() as checkpointer:
             result = resume_run(checkpointer, run.langgraph_thread_id, decision)

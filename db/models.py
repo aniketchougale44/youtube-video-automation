@@ -22,6 +22,14 @@ from db.base import Base
 EMBEDDING_DIM = 1536  # matches text-embedding-3-small / voyage-3-lite; adjust if the embedding model changes
 
 
+def _str_enum(enum_cls, name: str) -> SAEnum:
+    """SAEnum defaults to binding a Python Enum member's .name (e.g. "AWAITING_APPROVAL"); our
+    schemas.common enums are StrEnum, so the DB column (and the enum type created in the Alembic
+    migration) uses lowercase .value strings ("awaiting_approval") instead — values_callable
+    keeps the two in sync."""
+    return SAEnum(enum_cls, name=name, values_callable=lambda obj: [e.value for e in obj])
+
+
 def _uuid_pk() -> Mapped[uuid.UUID]:
     return mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
@@ -32,12 +40,12 @@ class Run(Base):
     __tablename__ = "runs"
 
     id: Mapped[uuid.UUID] = _uuid_pk()
-    status: Mapped[RunStatus] = mapped_column(SAEnum(RunStatus, name="run_status"), default=RunStatus.PENDING, index=True)
-    current_stage: Mapped[PipelineStage | None] = mapped_column(SAEnum(PipelineStage, name="pipeline_stage"), nullable=True)
+    status: Mapped[RunStatus] = mapped_column(_str_enum(RunStatus, "run_status"), default=RunStatus.PENDING, index=True)
+    current_stage: Mapped[PipelineStage | None] = mapped_column(_str_enum(PipelineStage, "pipeline_stage"), nullable=True)
     stage_status: Mapped[dict] = mapped_column(JSON, default=dict, doc="stage_name -> {status, retry_count, updated_at}")
 
-    content_type: Mapped[ContentType | None] = mapped_column(SAEnum(ContentType, name="content_type"), nullable=True)
-    content_format: Mapped[ContentFormat | None] = mapped_column(SAEnum(ContentFormat, name="content_format"), nullable=True)
+    content_type: Mapped[ContentType | None] = mapped_column(_str_enum(ContentType, "content_type"), nullable=True)
+    content_format: Mapped[ContentFormat | None] = mapped_column(_str_enum(ContentFormat, "content_format"), nullable=True)
     selected_topic: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     strategy_rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -71,7 +79,7 @@ class Video(Base):
     thumbnail_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     youtube_video_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
-    visibility: Mapped[Visibility | None] = mapped_column(SAEnum(Visibility, name="visibility"), nullable=True)
+    visibility: Mapped[Visibility | None] = mapped_column(_str_enum(Visibility, "visibility"), nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
@@ -90,7 +98,7 @@ class AgentLog(Base):
     id: Mapped[uuid.UUID] = _uuid_pk()
     run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), index=True)
 
-    stage: Mapped[PipelineStage] = mapped_column(SAEnum(PipelineStage, name="pipeline_stage_log"))
+    stage: Mapped[PipelineStage] = mapped_column(_str_enum(PipelineStage, "pipeline_stage_log"))
     agent_name: Mapped[str] = mapped_column(String(100))
     input_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     output_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -135,7 +143,7 @@ class Cost(Base):
     id: Mapped[uuid.UUID] = _uuid_pk()
     run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), index=True)
 
-    stage: Mapped[PipelineStage] = mapped_column(SAEnum(PipelineStage, name="pipeline_stage_cost"))
+    stage: Mapped[PipelineStage] = mapped_column(_str_enum(PipelineStage, "pipeline_stage_cost"))
     provider: Mapped[str] = mapped_column(String(50))
     unit_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     units: Mapped[float] = mapped_column(Float, default=0.0)

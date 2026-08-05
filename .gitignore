@@ -16,3 +16,5 @@ downloads/
 *.wav
 .DS_Store
 docker/data/
+docker-compose.override.yml
+.claude/

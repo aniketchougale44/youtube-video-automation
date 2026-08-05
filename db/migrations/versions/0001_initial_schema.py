@@ -50,9 +50,9 @@ def upgrade() -> None:
     op.execute("CREATE EXTENSION IF NOT EXISTS vector")
     op.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"')
 
-    bind = op.get_bind()
-    for enum in (RUN_STATUS, PIPELINE_STAGE, PIPELINE_STAGE_LOG, PIPELINE_STAGE_COST, CONTENT_TYPE, CONTENT_FORMAT, VISIBILITY):
-        enum.create(bind, checkfirst=True)
+    # Enum types are intentionally NOT pre-created here: each sa.Enum column below auto-creates
+    # its Postgres ENUM type as part of that table's DDL (with its own checkfirst). Pre-creating
+    # them separately causes a duplicate CREATE TYPE when create_table() creates it again.
 
     op.create_table(
         "runs",
