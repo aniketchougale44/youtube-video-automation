@@ -82,6 +82,9 @@ def persist_trace_as_agent_logs(db: Session, run_id: uuid.UUID, trace: list[dict
 
 def update_run_from_graph_result(db: Session, run: Run, result: dict, interrupted: bool) -> Run:
     run.stage_status = {**(run.stage_status or {}), "retry_counts": result.get("retry_counts", {})}
+    run.error = None  # a graph result means this attempt got past whatever tripped a prior failed
+    # attempt (worker/tasks.py marks run.error on exception) — clear it so the dashboard doesn't
+    # show a stale error for a run that's actually healthy now; the escalated branch below re-sets it.
 
     if interrupted:
         run.status = RunStatus.AWAITING_APPROVAL

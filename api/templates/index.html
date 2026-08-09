@@ -1,33 +1,199 @@
 {% extends "base.html" %}
-{% block title %}Runs — AutoTube AI{% endblock %}
+{% block title %}Dashboard — AutoTube AI{% endblock %}
 {% block content %}
-  <h3>Awaiting your approval ({{ pending|length }})</h3>
-  {% if not pending %}
-    <p><em>Nothing pending review.</em></p>
-  {% else %}
-  <table>
-    <tr><th>Run</th><th>Topic</th><th>Status</th><th></th></tr>
-    {% for run in pending %}
-    <tr>
-      <td><code>{{ run.id }}</code></td>
-      <td>{{ (run.selected_topic or {}).get("title", "—") }}</td>
-      <td><span class="badge badge-{{ run.status.value }}">{{ run.status.value }}</span></td>
-      <td><a href="/dashboard/{{ run.id }}">Review →</a></td>
-    </tr>
-    {% endfor %}
-  </table>
-  {% endif %}
+  <section id="approvals-section">
+    <div style="display:flex; align-items:baseline; justify-content:space-between;">
+      <h3 style="margin-bottom:0.25rem;">Awaiting your approval ({{ approvals|length }})</h3>
+    </div>
+    <div id="approvals-banner"></div>
+    {% if not approvals %}
+      <p class="empty-state">Nothing pending review.</p>
+    {% else %}
+    <div class="approval-grid">
+      {% for item in approvals %}
+      {% set run = item.run %}
+      {% set packet = item.packet %}
+      <div class="approval-card">
+        <div class="approval-card-head">
+          <div>
+            <strong>{{ (packet.title if packet else none) or (run.selected_topic or {}).get("title", "Untitled run") }}</strong>
+            <div class="stage-label"><code>{{ run.id|string|truncate(8, True, "") }}</code> · requested {{ run.updated_at }}</div>
+          </div>
+          <span class="badge badge-awaiting_approval"><span class="badge-dot"></span>awaiting approval</span>
+        </div>
 
-  <h3>Recent runs</h3>
+        {% if not packet %}
+          <p class="empty-state">Approval packet unavailable (checkpoint not reachable) — open full review for details.</p>
+        {% else %}
+          <p>{{ packet.description }}</p>
+          <p class="stage-label">Hook: {{ packet.script_summary }}</p>
+
+          <div class="thumbs">
+            {% for t in packet.thumbnail_options %}
+            <figure>
+              <div class="thumb-placeholder">thumbnail {{ loop.index }}</div>
+              <figcaption>#{{ loop.index0 }}</figcaption>
+            </figure>
+            {% endfor %}
+          </div>
+
+          <div class="compliance-chips">
+            <span class="badge {{ 'badge-published' if packet.compliance_result.copyright_risk_score <= 3 else 'badge-failed' }}">copyright risk {{ packet.compliance_result.copyright_risk_score }}/10</span>
+            <span class="badge {{ 'badge-published' if packet.compliance_result.av_sync_ok else 'badge-failed' }}">AV sync {{ "ok" if packet.compliance_result.av_sync_ok else "issue" }}</span>
+            <span class="badge {{ 'badge-published' if packet.compliance_result.spec_check_ok else 'badge-failed' }}">spec {{ "ok" if packet.compliance_result.spec_check_ok else "issue" }}</span>
+          </div>
+        {% endif %}
+
+        <div class="actions">
+          <form method="post" action="/dashboard/{{ run.id }}/approve">
+            <input type="hidden" name="selected_thumbnail_index" value="0">
+            <input type="text" name="reviewer" placeholder="your name" required>
+            <button class="approve" type="submit">Approve & Publish</button>
+          </form>
+          <form method="post" action="/dashboard/{{ run.id }}/reject">
+            <input type="text" name="reviewer" placeholder="your name" required>
+            <input type="text" name="notes" placeholder="reason for rejection">
+            <button class="reject" type="submit">Reject</button>
+          </form>
+          <a href="/dashboard/{{ run.id }}" class="stage-label">Full review →</a>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </section>
+
+  <div class="stat-grid" id="stat-grid"></div>
+
+  <h3>All runs <span id="runs-updated" class="stage-label"></span></h3>
   <table>
-    <tr><th>Run</th><th>Topic</th><th>Status</th><th>Created</th></tr>
-    {% for run in recent %}
-    <tr>
-      <td><code>{{ run.id }}</code></td>
-      <td>{{ (run.selected_topic or {}).get("title", "—") }}</td>
-      <td><span class="badge badge-{{ run.status.value }}">{{ run.status.value }}</span></td>
-      <td>{{ run.created_at }}</td>
-    </tr>
-    {% endfor %}
+    <thead><tr><th>Run</th><th>Topic</th><th>Status</th><th>Stage</th><th>Updated</th><th></th></tr></thead>
+    <tbody id="runs-body"></tbody>
   </table>
+
+  <h3>Live activity</h3>
+  <div class="log-feed" id="log-feed"></div>
+
+  <script id="initial-snapshot" type="application/json">{{ snapshot | tojson }}</script>
+  <script>
+    const STAT_TILES = [
+      ["running", "Running", false],
+      ["pending", "Queued", false],
+      ["awaiting_approval", "Awaiting approval", false],
+      ["published", "Published", false],
+      ["needs_attention", "Needs attention", true],
+    ];
+
+    function escapeHtml(s) {
+      return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+
+    function timeAgo(iso) {
+      if (!iso) return "—";
+      const seconds = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+      if (seconds < 5) return "just now";
+      if (seconds < 60) return `${seconds}s ago`;
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return `${minutes}m ago`;
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return `${hours}h ago`;
+      return `${Math.floor(hours / 24)}d ago`;
+    }
+
+    function renderStats(stats) {
+      const grid = document.getElementById("stat-grid");
+      grid.innerHTML = STAT_TILES.map(([key, label, isAttn]) => `
+        <div class="stat-tile${isAttn && stats[key] > 0 ? " attn" : ""}">
+          <div class="stat-value">${stats[key] ?? 0}</div>
+          <div class="stat-label">${label}</div>
+        </div>`).join("") + `
+        <div class="stat-tile">
+          <div class="stat-value">$${(stats.cost_today_usd ?? 0).toFixed(2)}</div>
+          <div class="stat-label">Cost today</div>
+        </div>
+        <div class="stat-tile">
+          <div class="stat-value">$${(stats.cost_total_usd ?? 0).toFixed(2)}</div>
+          <div class="stat-label">Cost total</div>
+        </div>`;
+    }
+
+    function renderRuns(runs) {
+      const body = document.getElementById("runs-body");
+      if (!runs.length) {
+        body.innerHTML = `<tr><td colspan="6" class="empty-state">No runs yet.</td></tr>`;
+        return;
+      }
+      body.innerHTML = runs.map((r) => {
+        const pct = r.progress_total ? Math.round((r.progress / r.progress_total) * 100) : 0;
+        const done = r.status === "published";
+        const link = r.status === "awaiting_approval" ? `<a href="/dashboard/${r.id}">Review →</a>` : "";
+        return `
+        <tr>
+          <td><code title="${r.id}">${r.short_id}</code></td>
+          <td>${escapeHtml(r.topic)}</td>
+          <td><span class="badge badge-${r.status}"><span class="badge-dot"></span>${r.status}</span></td>
+          <td>
+            <div class="stage-label">${escapeHtml(r.stage_label)}${r.progress_total ? ` (${r.progress}/${r.progress_total})` : ""}</div>
+            <div class="progress-track"><div class="progress-fill${done ? " done" : ""}" style="width:${pct}%"></div></div>
+          </td>
+          <td>${timeAgo(r.updated_at)}</td>
+          <td>${link}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function renderLogs(logs) {
+      const feed = document.getElementById("log-feed");
+      if (!logs.length) {
+        feed.innerHTML = `<div class="empty-state" style="padding:1rem;">No agent activity yet.</div>`;
+        return;
+      }
+      feed.innerHTML = logs.map((l) => {
+        let icon = "•", cls = "";
+        if (l.error) { icon = "✗"; cls = "fail"; }
+        else if (l.is_critic && l.passed !== null) { icon = l.passed ? "✓" : "✗"; cls = l.passed ? "pass" : "fail"; }
+        const score = l.critic_score !== null && l.critic_score !== undefined ? ` · score ${l.critic_score}` : "";
+        return `
+        <div class="log-row">
+          <span class="log-time">${timeAgo(l.created_at)}</span>
+          <span><span class="log-icon ${cls}">${icon}</span> <code>${l.run_short}</code> — ${escapeHtml(l.agent_name)}${score}${l.error ? ` — ${escapeHtml(l.error)}` : ""}</span>
+          <span class="stage-label">${escapeHtml(l.stage)}</span>
+        </div>`;
+      }).join("");
+    }
+
+    function renderApprovalsBanner(awaitingCount) {
+      const banner = document.getElementById("approvals-banner");
+      if (awaitingCount > renderedApprovalCount) {
+        banner.innerHTML = `<p class="approval-alert">New run${awaitingCount - renderedApprovalCount > 1 ? "s" : ""} awaiting approval — <a href="javascript:location.reload()">refresh to review</a>.</p>`;
+      } else if (awaitingCount === 0) {
+        banner.innerHTML = "";
+      }
+    }
+
+    function applySnapshot(snapshot) {
+      renderStats(snapshot.stats);
+      renderRuns(snapshot.runs);
+      renderLogs(snapshot.logs);
+      renderApprovalsBanner(snapshot.stats.awaiting_approval);
+      document.getElementById("runs-updated").textContent = "updated " + timeAgo(snapshot.generated_at);
+    }
+
+    const initial = JSON.parse(document.getElementById("initial-snapshot").textContent);
+    const renderedApprovalCount = initial.stats.awaiting_approval;
+    applySnapshot(initial);
+
+    const liveDot = document.getElementById("live-dot");
+    const liveText = document.getElementById("live-text");
+    const source = new EventSource("/dashboard/stream");
+    source.onmessage = (event) => {
+      liveDot.className = "live-dot on";
+      liveText.textContent = "live";
+      applySnapshot(JSON.parse(event.data));
+    };
+    source.onerror = () => {
+      liveDot.className = "live-dot off";
+      liveText.textContent = "reconnecting…";
+    };
+  </script>
 {% endblock %}

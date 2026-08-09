@@ -193,12 +193,18 @@ class TranscriptEmbedding(Base):
 
 class ScriptEmbedding(Base):
     """Embeddings of our own published/generated scripts — self-originality check across our own
-    back catalog, and feedstock for the Learning Agent."""
+    back catalog, and feedstock for the Learning Agent.
+
+    run_id here is the LangGraph thread_id (Run.langgraph_thread_id), not Run.id — graph nodes
+    (tools/embeddings.py, called from critic_script_qa_node) only ever see PipelineState["run_id"],
+    which is populated from the thread_id, never the real Run.id primary key (see graph/run.py's
+    run_id/thread_id conflation). FK targets Run.langgraph_thread_id (unique-indexed) accordingly.
+    """
 
     __tablename__ = "script_embeddings"
 
     id: Mapped[uuid.UUID] = _uuid_pk()
-    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), index=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.langgraph_thread_id", ondelete="CASCADE"), index=True)
     chunk_index: Mapped[int] = mapped_column(Integer, default=0)
     text_chunk: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM))

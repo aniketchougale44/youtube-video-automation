@@ -34,6 +34,36 @@ def _public_client():
     return build("youtube", "v3", developerKey=settings.youtube_api_key, cache_discovery=False)
 
 
+def _oauth_client():
+    """Account-scoped client (upload, analytics) authenticated via the refresh token minted by
+    scripts/youtube_oauth_setup.py. google-auth transparently exchanges it for a short-lived
+    access token on first use and refreshes again whenever that token expires."""
+    settings = get_settings()
+    missing = [
+        name
+        for name, value in (
+            ("YOUTUBE_CLIENT_ID", settings.youtube_client_id),
+            ("YOUTUBE_CLIENT_SECRET", settings.youtube_client_secret),
+            ("YOUTUBE_REFRESH_TOKEN", settings.youtube_refresh_token),
+        )
+        if not value
+    ]
+    if missing:
+        raise YouTubeNotConfiguredError(f"OAuth not configured, missing: {', '.join(missing)}")
+
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+
+    credentials = Credentials(
+        token=None,
+        refresh_token=settings.youtube_refresh_token,
+        client_id=settings.youtube_client_id,
+        client_secret=settings.youtube_client_secret,
+        token_uri="https://oauth2.googleapis.com/token",
+    )
+    return build("youtube", "v3", credentials=credentials, cache_discovery=False)
+
+
 def most_popular(region_code: str = "US", category_id: str | None = None, max_results: int = 25) -> list[dict]:
     return _most_popular_call(_public_client(), region_code, category_id, max_results)
 
@@ -107,12 +137,36 @@ def analytics_report(video_id: str, window: str) -> dict:
     return {"video_id": video_id, "window": window, "views": 0, "impressions": 0, "ctr": 0.0, "avg_view_duration_seconds": 0.0}
 
 
-@with_resilience(provider="youtube_upload_api", max_attempts=5, cooldown_seconds=300)
 def resumable_upload(file_path: str, metadata: dict, thumbnail_path: str | None = None, visibility: str = "unlisted") -> str:
+    """Uploads `file_path` to the OAuth-authorized channel. `metadata` is {"title", "description",
+    "tags"}; `visibility` is a Visibility value ("private"/"unlisted"/"public")."""
+    return _resumable_upload_call(_oauth_client(), file_path, metadata, thumbnail_path, visibility)
+
+
+@with_resilience(provider="youtube_upload_api", max_attempts=5, cooldown_seconds=300)
+def _resumable_upload_call(youtube, file_path: str, metadata: dict, thumbnail_path: str | None, visibility: str) -> str:
+    from googleapiclient.http import MediaFileUpload
+
     quota.consume("videos.insert")
-    logger.info("youtube.upload.stub", file_path=file_path, visibility=visibility)
-    # STUB: needs OAuth — wired in with the Upload Agent's real implementation. Real call:
-    # MediaFileUpload(file_path, chunksize=-1, resumable=True) + youtube.videos().insert(...).next_chunk()
+    body = {
+        "snippet": {
+            "title": metadata.get("title", "Untitled"),
+            "description": metadata.get("description", ""),
+            "tags": metadata.get("tags", []),
+        },
+        "status": {"privacyStatus": visibility},
+    }
+    media = MediaFileUpload(file_path, chunksize=-1, resumable=True)
+    request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+
+    response = None
+    while response is None:
+        _progress, response = request.next_chunk()
+    video_id = response["id"]
+
     if thumbnail_path:
         quota.consume("thumbnails.set")
-    return "stub_yt_id_000"
+        youtube.thumbnails().set(videoId=video_id, media_body=MediaFileUpload(thumbnail_path)).execute()
+
+    logger.info("youtube.upload.complete", video_id=video_id, visibility=visibility)
+    return video_id

@@ -2,6 +2,9 @@
 pipeline inline in a request/response cycle."""
 import uuid
 
+from sqlalchemy.orm import Session
+
+from agents.schemas.common import RunStatus
 from core.logging import configure_logging, get_logger
 from db.base import SessionLocal
 from db.crud import (
@@ -17,6 +20,21 @@ from worker.celery_app import celery_app
 
 configure_logging()
 logger = get_logger("worker.tasks")
+
+
+def _mark_run_failed(db: Session, run_id: str, error: BaseException) -> None:
+    """Surfaces a task-level exception on the Run row itself. Without this, a run that errors
+    before update_run_from_graph_result ever runs (e.g. a missing API key, a network failure)
+    stays frozen at whatever status it already had — invisible to the dashboard even though
+    Celery is retrying (or has given up) in the background."""
+    db.rollback()
+    run = get_run(db, uuid.UUID(run_id))
+    if run is None:
+        return
+    run.status = RunStatus.FAILED
+    run.error = str(error)[:2000]
+    db.add(run)
+    db.commit()
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=30, name="worker.run_pipeline_task")
@@ -48,6 +66,7 @@ def run_pipeline_task(self, run_id: str) -> dict:
         return {"run_id": run_id, "status": str(run.status), "interrupted": interrupted}
     except Exception as exc:
         logger.error("pipeline.task.failed", run_id=run_id, error=str(exc))
+        _mark_run_failed(db, run_id, exc)
         raise self.retry(exc=exc)
     finally:
         db.close()
@@ -72,6 +91,7 @@ def resume_pipeline_task(self, run_id: str, decision: dict) -> dict:
         return {"run_id": run_id, "status": str(run.status)}
     except Exception as exc:
         logger.error("pipeline.resume.failed", run_id=run_id, error=str(exc))
+        _mark_run_failed(db, run_id, exc)
         raise self.retry(exc=exc)
     finally:
         db.close()

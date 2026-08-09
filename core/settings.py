@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     require_human_approval: bool = True
     quality_score_threshold: float = 8.5
     max_critic_retries: int = 3
+    originality_similarity_threshold: float = 0.82  # cosine similarity (0-1); separate scale from
+    # quality_score_threshold (0-10) — don't conflate the two
 
     # Channel strategy
     channel_goals: str = (
@@ -62,6 +64,8 @@ class Settings(BaseSettings):
     elevenlabs_voice_id: str = ""
     azure_speech_key: str = ""
     azure_speech_region: str = ""
+    openai_tts_model: str = "tts-1"
+    openai_tts_voice: str = "alloy"
 
     # Stock media
     pexels_api_key: str = ""
@@ -83,6 +87,9 @@ class Settings(BaseSettings):
     smtp_port: int = 587
     smtp_user: str = ""
     smtp_password: str = ""
+
+    # Media (rendered assets/audio/video land under here, per-run subfolders)
+    media_dir: str = "./media"
 
     # Dashboard
     dashboard_base_url: str = "http://localhost:8000"

@@ -5,32 +5,78 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}AutoTube AI{% endblock %}</title>
   <style>
-    :root { color-scheme: light dark; }
-    body { font-family: -apple-system, Segoe UI, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+    :root {
+      color-scheme: light dark;
+      --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+      --running: #2a78d6; --muted: #898781; --border: rgba(11,11,11,0.10);
+    }
+    @media (prefers-color-scheme: dark) { :root { --border: rgba(255,255,255,0.10); } }
+    body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
     header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 1.5rem; }
     header a { text-decoration: none; color: inherit; }
+    .live-indicator { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; color: var(--muted); }
+    .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+    .live-dot.on { background: var(--good); animation: pulse 1.6s ease-in-out infinite; }
+    .live-dot.off { background: var(--critical); }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
     table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
     th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #8884; }
-    .badge { padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.8rem; }
-    .badge-awaiting_approval { background: #f5a62333; }
-    .badge-published { background: #2ecc7133; }
-    .badge-failed, .badge-escalated, .badge-rejected { background: #e74c3c33; }
-    .badge-running, .badge-pending { background: #3498db33; }
+    tbody tr:hover { background: #8881; }
+    .badge { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.8rem; font-weight: 600; white-space: nowrap; background: color-mix(in srgb, var(--muted) 15%, transparent); }
+    .badge-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--muted); }
+    .badge-awaiting_approval { background: color-mix(in srgb, var(--warning) 20%, transparent); }
+    .badge-awaiting_approval .badge-dot { background: var(--warning); }
+    .badge-published { background: color-mix(in srgb, var(--good) 20%, transparent); }
+    .badge-published .badge-dot { background: var(--good); }
+    .badge-failed, .badge-escalated { background: color-mix(in srgb, var(--critical) 20%, transparent); }
+    .badge-failed .badge-dot, .badge-escalated .badge-dot { background: var(--critical); }
+    .badge-rejected { background: color-mix(in srgb, var(--muted) 20%, transparent); }
+    .badge-rejected .badge-dot { background: var(--muted); }
+    .badge-running { background: color-mix(in srgb, var(--running) 20%, transparent); }
+    .badge-running .badge-dot { background: var(--running); animation: pulse 1.6s ease-in-out infinite; }
+    .badge-pending { background: color-mix(in srgb, var(--muted) 15%, transparent); }
+    .badge-pending .badge-dot { background: var(--muted); }
     .card { border: 1px solid #8884; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
-    .thumbs { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 0.75rem; margin: 1rem 0 1.5rem; }
+    .stat-tile { border: 1px solid #8884; border-radius: 8px; padding: 0.75rem 1rem; }
+    .stat-tile .stat-value { font-size: 1.6rem; font-weight: 700; font-variant-numeric: proportional-nums; }
+    .stat-tile .stat-label { font-size: 0.78rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+    .stat-tile.attn .stat-value { color: var(--critical); }
+    .progress-track { width: 100%; height: 4px; border-radius: 999px; background: #8883; overflow: hidden; margin-top: 0.3rem; }
+    .progress-fill { height: 100%; background: var(--running); border-radius: 999px; transition: width 0.6s ease; }
+    .progress-fill.done { background: var(--good); }
+    .stage-label { font-size: 0.78rem; color: var(--muted); }
+    .thumbs { display: flex; gap: 1rem; flex-wrap: wrap; margin: 0.5rem 0; }
     .thumbs figure { margin: 0; text-align: center; font-size: 0.85rem; }
+    .thumb-placeholder { width: 160px; height: 90px; background: #8882; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 0.75rem; color: var(--muted); }
+    .approval-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 1rem; margin: 0.75rem 0 1.5rem; }
+    .approval-card { border: 2px solid color-mix(in srgb, var(--warning) 45%, transparent); border-radius: 10px; padding: 1rem; background: color-mix(in srgb, var(--warning) 6%, transparent); }
+    .approval-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.75rem; margin-bottom: 0.5rem; }
+    .compliance-chips { display: flex; gap: 0.4rem; flex-wrap: wrap; margin: 0.5rem 0; }
+    .approval-alert { background: color-mix(in srgb, var(--running) 15%, transparent); border: 1px solid color-mix(in srgb, var(--running) 40%, transparent); border-radius: 8px; padding: 0.6rem 0.9rem; margin: 0.5rem 0; font-size: 0.9rem; }
     .actions form { display: inline-block; margin-right: 0.5rem; }
     button { padding: 0.5rem 1.25rem; border-radius: 6px; border: none; cursor: pointer; font-weight: 600; }
     .approve { background: #2ecc71; color: #fff; }
     .reject { background: #e74c3c; color: #fff; }
     textarea, input[type=text] { width: 100%; padding: 0.4rem; box-sizing: border-box; }
     code { background: #8882; padding: 0.1rem 0.35rem; border-radius: 4px; }
+    .log-feed { max-height: 360px; overflow-y: auto; border: 1px solid #8884; border-radius: 8px; }
+    .log-row { display: grid; grid-template-columns: 5.5rem 1fr auto; gap: 0.75rem; align-items: baseline; padding: 0.4rem 0.75rem; border-bottom: 1px solid #8882; font-size: 0.85rem; }
+    .log-row:last-child { border-bottom: none; }
+    .log-time { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .log-icon { font-weight: 700; }
+    .log-icon.pass { color: var(--good); }
+    .log-icon.fail { color: var(--critical); }
+    .empty-state { color: var(--muted); font-style: italic; padding: 1rem 0; }
   </style>
 </head>
 <body>
   <header>
-    <a href="/dashboard/"><h2>AutoTube AI — Review Dashboard</h2></a>
-    <a href="/docs">API docs</a>
+    <a href="/dashboard/"><h2>AutoTube AI — Live Dashboard</h2></a>
+    <div style="display:flex; align-items:center; gap:1.25rem;">
+      <span class="live-indicator"><span class="live-dot" id="live-dot"></span><span id="live-text">connecting…</span></span>
+      <a href="/docs">API docs</a>
+    </div>
   </header>
   {% block content %}{% endblock %}
 </body>
