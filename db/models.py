@@ -19,7 +19,9 @@ from agents.schemas.common import ContentFormat, ContentType, PipelineStage, Run
 from agents.schemas.publish import Visibility
 from db.base import Base
 
-EMBEDDING_DIM = 1536  # matches text-embedding-3-small / voyage-3-lite; adjust if the embedding model changes
+EMBEDDING_DIM = 768  # matches gemini-embedding-001 (free tier) / text-embedding-3-small truncated
+# via `dimensions=768` -- see tools/embeddings.py and migration 0004 for why both providers write
+# into this same shape.
 
 
 def _str_enum(enum_cls, name: str) -> SAEnum:

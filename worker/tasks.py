@@ -8,7 +8,10 @@ from agents.schemas.common import RunStatus
 from core.logging import configure_logging, get_logger
 from db.base import SessionLocal
 from db.crud import (
+    compute_performance_baseline,
     get_run,
+    get_video_by_youtube_id,
+    persist_performance_snapshot,
     persist_trace_as_agent_logs,
     summarize_recent_performance,
     update_run_from_graph_result,
@@ -99,12 +102,34 @@ def resume_pipeline_task(self, run_id: str, decision: dict) -> dict:
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60, name="worker.performance_feedback_task")
 def performance_feedback_task(self, youtube_video_id: str, window: str) -> dict:
-    """Triggered by the scheduler at the 24h/7d mark after a video publishes."""
+    """Triggered by the scheduler at the 24h/7d mark after a video publishes. Computes the
+    historical baseline and persists the resulting snapshot -- this is what makes
+    db.crud.summarize_recent_performance() (read by strategy_node on the *next* run) see real
+    data instead of "no data yet" forever."""
+    db = SessionLocal()
     try:
+        video = get_video_by_youtube_id(db, youtube_video_id)
+        if video is None:
+            logger.error("performance_feedback.video_not_found", youtube_video_id=youtube_video_id)
+            return {"youtube_video_id": youtube_video_id, "window": window, "status": "video_not_found"}
+
+        baseline = compute_performance_baseline(db, exclude_video_id=video.id)
+
         app = build_feedback_graph().compile()
-        result = app.invoke({"youtube_video_id": youtube_video_id, "window": window})
-        logger.info("performance_feedback.complete", youtube_video_id=youtube_video_id, window=window)
+        result = app.invoke({"youtube_video_id": youtube_video_id, "window": window, "baseline": baseline})
+
+        persist_performance_snapshot(db, video.id, result["performance_snapshot"])
+        persist_trace_as_agent_logs(db, video.run_id, result.get("trace", []))
+
+        logger.info(
+            "performance_feedback.complete",
+            youtube_video_id=youtube_video_id,
+            window=window,
+            insights=result.get("learning_update", {}).get("insights"),
+        )
         return result
     except Exception as exc:
         logger.error("performance_feedback.failed", youtube_video_id=youtube_video_id, error=str(exc))
         raise self.retry(exc=exc)
+    finally:
+        db.close()

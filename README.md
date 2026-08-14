@@ -10,29 +10,80 @@ agents for quality and policy compliance, with a human-approval gate before anyt
 > transcript. The Script QA critic hard-blocks on similarity/plagiarism before a script can
 > proceed.
 
-## Status: real logic landing stage by stage
+## Status: every stage has real logic
 
 The full pipeline is wired end-to-end (every node, every DB table, the FastAPI control API +
-review dashboard, the Celery worker, the APScheduler cron process) — verified by running the
-graph through the happy path, both critic retry loops, escalation, and the human-approval
-interrupt/resume cycle. Real agent logic is being implemented one stage at a time on top of that
-skeleton; stages not yet converted still return clearly-marked `[STUB]` placeholder data.
+review dashboard, the Celery worker, the APScheduler cron process) and every agent/critic node
+runs real logic, not placeholder data — verified by running the graph through the happy path,
+both critic retry loops, escalation, the human-approval interrupt/resume cycle, and the delayed
+feedback graph. What's left is not code, it's the operator setting up their own accounts and
+credentials — see [Go-live checklist](#go-live-checklist) below.
 
-**Done — real logic:**
 - **Trend Research Agent** (`graph/nodes/research.py::trend_research_node`) — pulls real YouTube
   "most popular" videos (`tools/youtube.py`, API-key auth), has an LLM cluster them into original
   content angles (never verbatim topics), then scores each candidate on objective, code-computed
   signals (view-count-derived competition, publish-date freshness, Google Trends rising/top query
-  hits via `tools/trends.py` — live-tested against real Google Trends in this repo's dev history).
+  hits via `tools/trends.py`).
 - **Strategy Agent** (`::strategy_node`) — LLM picks one candidate given channel goals and a real
   past-performance summary pulled from Postgres (`db/crud.py::summarize_recent_performance`,
   injected by `worker/tasks.py` at the Celery-task boundary so graph nodes stay DB-free).
-- **Shared LLM client** (`core/llm.py`) — Claude Sonnet primary, GPT-4o-mini fallback, structured
-  Pydantic output, used by both agents above and every future LLM-driven stage.
+- **Script Writer + Script QA critic + Fact-Check** (`graph/nodes/script.py`) — LLM-drafted script,
+  originality gate via pgvector embedding similarity against both prior YouTube transcripts and
+  our own back catalog (`tools/embeddings.py`), LLM claim extraction + Tavily-backed verification.
+- **Visual Planning + Asset sourcing** (`graph/nodes/visual.py`) — LLM scene plan, Pexels/Pixabay
+  stock search with AI image-gen fallback when no stock match exists.
+- **Voiceover + Video Assembly** (`graph/nodes/audio_render.py`) — real TTS synthesis, MoviePy/
+  FFmpeg render with caption burn-in.
+- **Metadata/SEO + Thumbnail + Compliance critic** (`graph/nodes/publish.py`) — LLM-driven SEO
+  copy and thumbnail candidates, a compliance gate combining a similarity-based copyright-risk
+  proxy, an LLM community-guidelines self-check, and AV-sync/spec checks against the actual
+  render.
+- **Upload** (`::upload_node`) — real resumable `videos.insert` via OAuth (`tools/youtube.py`).
+- **Performance Monitor + Learning** (`graph/nodes/feedback.py`, `graph/feedback_graph.py`) — real
+  YouTube Analytics API pull (views/likes/comments/retention) per video/window, compared against a
+  Postgres-computed baseline across prior published videos; the resulting `PerformanceSnapshot` is
+  persisted so the *next* run's Strategy Agent sees it via `summarize_recent_performance`. Note:
+  YouTube's public Analytics API doesn't expose thumbnail impressions/CTR (that's Studio-UI-only),
+  so those two fields are always `0` — a real API limitation, not something unfinished here.
+- **Notifications** (`tools/notify.py`) — Slack, Telegram, and email are all real; each fires
+  independently whenever its own credentials are configured.
+- **Shared LLM client** (`core/llm.py`) — tries Anthropic, OpenAI, Groq, then Gemini in order
+  (each skipped if unconfigured; Groq/Gemini are free, no card required), structured Pydantic
+  output, used by every LLM-driven stage above.
 
-**Still stub:** Script Writer + Script QA critic, Fact-Check, Visual Planning + Asset sourcing,
-Voiceover, Video Assembly, Metadata/SEO + Thumbnail, Compliance critic, Upload, Performance
-Monitor + Learning.
+## Go-live checklist
+
+Everything above is real code, and every external call has a genuinely free path — this can run
+end-to-end without a credit card. Two things only an operator with their own accounts can do:
+
+1. **Get one LLM provider key.** Tried in order, first one set wins: `ANTHROPIC_API_KEY` ->
+   `OPENAI_API_KEY` -> `GROQ_API_KEY` -> `GOOGLE_API_KEY`. The last two are **free, no card
+   required**:
+   - Groq: https://console.groq.com/keys (Llama 3.3 70B, very fast)
+   - Google AI Studio: https://aistudio.google.com/apikey (Gemini 2.0 Flash)
+
+   With none of the four set, every LLM-driven node (research, strategy, script, metadata,
+   compliance) fails with `NoLLMProviderConfigured`.
+2. **Run the YouTube OAuth flow once, locally:** `python scripts/youtube_oauth_setup.py`. Opens
+   your browser, you sign in and approve access to your own channel — free, just requires you to
+   click through it once — and it writes `YOUTUBE_REFRESH_TOKEN` / `YOUTUBE_CHANNEL_ID` into
+   `.env`. Required for `upload_node` and for the Performance Monitor Agent's Analytics pull. If
+   you ran this script before the `yt-analytics.readonly` scope was added, re-run it — the old
+   token won't cover analytics calls.
+
+Also needed either way: the **Docker daemon running** (or Postgres+pgvector/Redis reachable
+locally) before `docker compose up` / `alembic upgrade head`.
+
+**Free by default, everywhere else too** — no signup needed at all for these, they're already the
+default:
+- **Voiceover** (`TTS_PROVIDER=edge`) — edge-tts, Microsoft Edge's neural voices, keyless.
+- **Images/thumbnails** (`IMAGE_GEN_PROVIDER=pollinations`) — Pollinations.ai, keyless.
+- Both automatically fall back to their free path even if you set the paid provider
+  (`openai`) but its key is missing or out of credits — see `tools/tts.py` / `tools/image_gen.py`.
+
+Optional, free, not blocking: `PEXELS_API_KEY` / `PIXABAY_API_KEY` (real stock footage/photos
+instead of always falling back to AI image-gen — both have free tiers, sign up for either),
+`TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID` / `SMTP_*` (Slack-only alerting works fine without them).
 
 ## Architecture
 
@@ -199,36 +250,41 @@ wiring before real critic logic lands.
 
 ## Estimated cost per video
 
-Rough, provider-list-price estimates for an ~8-minute long-form video (short-form videos are a
-fraction of this — mostly the TTS/render cost scales down with length):
+Two cost profiles, depending on which providers you configure:
+
+**Running entirely on free tiers** (Groq or Gemini for every LLM call, edge-tts for voiceover,
+Pollinations.ai for images, Pexels/Pixabay for stock, YouTube Data/Analytics API which is
+quota-based not billed) — **$0.00/video**, subject to each free tier's rate limits.
+
+**Running on paid providers** (rough, provider-list-price estimates for an ~8-minute long-form
+video; short-form videos are a fraction of this):
 
 | Stage | Provider (example) | Est. cost |
 |---|---|---|
 | Trend research + strategy (LLM calls) | Claude Sonnet / GPT-4o-mini | $0.05 |
 | Script writing + revisions (avg. 1.5 attempts) | Claude Sonnet | $0.15 |
 | Fact-checking (Tavily searches) | Tavily | $0.02 |
-| Voiceover (~1,200 words) | ElevenLabs | $0.30 |
+| Voiceover (~1,200 words) | OpenAI TTS | $0.20 |
 | Stock visuals (8-10 clips) | Pexels/Pixabay | $0.00 (free tier) |
 | AI-generated images (where no stock match) | OpenAI images | $0.08 |
 | Thumbnail generation (2-3 candidates) | OpenAI images | $0.06 |
 | Metadata/SEO + compliance critic (LLM calls) | Claude Sonnet / GPT-4o-mini | $0.04 |
 | YouTube upload | Data API v3 | $0.00 (quota, not billed) |
-| **Total (LLM + TTS + image-gen only)** | | **≈ $0.70 / video** |
+| **Total (LLM + TTS + image-gen only)** | | **≈ $0.60 / video** |
 
-Not included above: compute (rendering CPU time), Postgres/Redis hosting, and any paid stock-media
-tier. At 3 videos/week (the default cadence) that's roughly **$8-9/month** in variable API spend —
-cheap enough that the real constraint is quality, not budget. `db.models.Cost` is where actual
-per-run spend gets logged once each tool wrapper reports real provider costs, so this table can be
-replaced with measured numbers.
+Not included above: compute (rendering CPU time), Postgres/Redis hosting. At 3 videos/week (the
+default cadence) that's roughly **$7-8/month** in variable API spend on the paid path, or $0 on
+the free path. `db.models.Cost` is where actual per-run spend gets logged once each tool wrapper
+reports real provider costs, so this table can be replaced with measured numbers.
 
-## What's next (real-logic phase, per stage)
+## What's next
 
-1. Script Writer + Script QA critic — LLM prompts, `youtube-transcript-api` + pgvector
-   embedding-similarity originality check (`db.models.TranscriptEmbedding`).
-2. Trend Research + Strategy — real YouTube Data API / Google Trends / Analytics API calls.
-3. Visual + Voiceover + Assembly — real Pexels/Pixabay/image-gen sourcing, TTS synthesis,
-   MoviePy/FFmpeg render with caption burn-in.
-4. Metadata/SEO + Thumbnail + Compliance critic — LLM-driven SEO copy, thumbnail candidates,
-   Content-ID risk + community-guidelines self-check.
-5. Upload — real resumable `videos.insert`, quota-aware.
-6. Performance Monitor + Learning — real Analytics API pulls feeding Strategy Agent weights.
+All stages have real logic (see [Status](#status-every-stage-has-real-logic) above) and the only
+remaining work to run this unattended in production is the three operator steps in the
+[go-live checklist](#go-live-checklist). Beyond that, reasonable next investments:
+
+- Wire `LearningUpdate.strategy_weight_adjustments` (currently computed and persisted to
+  `AgentLog`, but not yet read back) into `strategy_node`'s prompt as an explicit numeric signal,
+  on top of the qualitative `past_performance_summary` text it already reads.
+- A YouTube PubSubHubbub webhook (`api/routes/webhooks.py` is currently a placeholder) to react to
+  channel events in near-real-time instead of only via the hourly scheduler poll.

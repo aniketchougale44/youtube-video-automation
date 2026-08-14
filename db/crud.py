@@ -37,6 +37,47 @@ def list_runs(db: Session, status: RunStatus | None = None, limit: int = 50) -> 
     return list(db.execute(stmt).scalars())
 
 
+def get_video_by_youtube_id(db: Session, youtube_video_id: str) -> Video | None:
+    return db.execute(select(Video).where(Video.youtube_video_id == youtube_video_id)).scalar_one_or_none()
+
+
+def compute_performance_baseline(db: Session, exclude_video_id: uuid.UUID | None = None) -> dict:
+    """Averages views/retention across every existing PerformanceSnapshot (any window), excluding
+    the video currently being scored -- this is the "baseline" the Learning Agent compares a new
+    snapshot against. Returns sample_size=0 until at least one prior snapshot exists."""
+    stmt = select(PerformanceSnapshot)
+    if exclude_video_id is not None:
+        stmt = stmt.where(PerformanceSnapshot.video_id != exclude_video_id)
+    snapshots = list(db.execute(stmt).scalars())
+
+    if not snapshots:
+        return {"sample_size": 0, "avg_views": 0.0, "avg_retention_pct": 0.0}
+
+    return {
+        "sample_size": len(snapshots),
+        "avg_views": sum(s.views for s in snapshots) / len(snapshots),
+        "avg_retention_pct": sum(s.retention_pct for s in snapshots) / len(snapshots),
+    }
+
+
+def persist_performance_snapshot(db: Session, video_id: uuid.UUID, snapshot: dict) -> PerformanceSnapshot:
+    row = PerformanceSnapshot(
+        video_id=video_id,
+        window=snapshot.get("window", "24h"),
+        views=snapshot.get("views", 0),
+        impressions=snapshot.get("impressions", 0),
+        ctr=snapshot.get("ctr", 0.0),
+        avg_view_duration_seconds=snapshot.get("avg_view_duration_seconds", 0.0),
+        retention_pct=snapshot.get("retention_pct", 0.0),
+        likes=snapshot.get("likes", 0),
+        comments=snapshot.get("comments", 0),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
 def summarize_recent_performance(db: Session, limit: int = 5) -> str:
     """Human-readable digest of the most recent performance snapshots, fed into the Strategy
     Agent's prompt so it can weigh past results rather than deciding blind every run."""

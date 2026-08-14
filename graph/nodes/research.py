@@ -168,6 +168,13 @@ def trend_research_node(state: PipelineState) -> dict:
         except Exception as exc:
             logger.error("trend_research.most_popular_failed", category_id=category_id, error=str(exc))
 
+    search_queries = [q.strip() for q in settings.trend_search_queries.split(",") if q.strip()]
+    for query in search_queries:
+        try:
+            raw_videos.extend(youtube_tool.search_with_stats(query, max_results=10))
+        except Exception as exc:
+            logger.error("trend_research.search_failed", query=query, error=str(exc))
+
     deduped = _dedupe_videos(raw_videos)
     if not deduped:
         raise RuntimeError("trend_research: no trending videos retrieved from any configured category")

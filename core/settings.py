@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     )
     trend_region_code: str = "US"
     trend_category_ids: str = ""  # comma-separated YouTube category IDs; empty = no filter
+    # comma-separated search queries, e.g. "nursery rhymes for kids,abc song for toddlers" --
+    # supplements the generic regional mostPopular chart for niches it won't reliably surface
+    trend_search_queries: str = ""
     max_trend_candidates: int = 5
 
     # Postgres
@@ -39,11 +42,17 @@ class Settings(BaseSettings):
     # Scheduling
     pipeline_cron_schedule: str = "0 14 * * mon,wed,fri"
 
-    # LLM
+    # LLM (fallback order: anthropic -> openai -> groq -> gemini; each is skipped if its key is
+    # unset, so a deployment can run on just the free tiers with no paid provider configured)
     anthropic_api_key: str = ""
     llm_primary_model: str = "claude-sonnet-4-5"
     openai_api_key: str = ""
     llm_fallback_model: str = "gpt-4o-mini"
+    groq_api_key: str = ""  # free, no card required: console.groq.com
+    llm_groq_model: str = "llama-3.3-70b-versatile"
+    google_api_key: str = ""  # free, no card required: aistudio.google.com/apikey
+    llm_gemini_model: str = "gemini-2.0-flash"
+    gemini_embedding_model: str = "models/gemini-embedding-001"
     langsmith_api_key: str = ""
     langsmith_project: str = "autotube-ai"
     langsmith_tracing: bool = True
@@ -59,20 +68,26 @@ class Settings(BaseSettings):
     # Research
     tavily_api_key: str = ""
 
-    # TTS
+    # TTS: "openai" (paid, needs openai_api_key) | anything else -> edge-tts (free, keyless,
+    # Microsoft Edge neural voices, always available as a fallback even when tts_provider="openai"
+    # but the key is unset/unfunded). elevenlabs/azure are reserved for a future provider.
+    tts_provider: str = "edge"
     elevenlabs_api_key: str = ""
     elevenlabs_voice_id: str = ""
     azure_speech_key: str = ""
     azure_speech_region: str = ""
     openai_tts_model: str = "tts-1"
     openai_tts_voice: str = "alloy"
+    edge_tts_voice: str = "en-US-AndrewNeural"
 
     # Stock media
     pexels_api_key: str = ""
     pixabay_api_key: str = ""
 
-    # Image gen
-    image_gen_provider: str = "openai"
+    # Image gen: "openai" (paid, needs openai_api_key) | anything else -> Pollinations.ai (free,
+    # keyless, always available as a fallback even when image_gen_provider="openai" but the key
+    # is unset/unfunded)
+    image_gen_provider: str = "pollinations"
     openai_image_model: str = "gpt-image-1"
     stability_api_key: str = ""
     replicate_api_token: str = ""

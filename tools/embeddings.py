@@ -25,33 +25,62 @@ from sqlalchemy.orm import Session
 from core.logging import get_logger
 from core.settings import get_settings
 from db.base import SessionLocal
-from db.models import ScriptEmbedding, TranscriptEmbedding
+from db.models import EMBEDDING_DIM, ScriptEmbedding, TranscriptEmbedding
 from tools.resilience import with_resilience
 
 logger = get_logger("tools.embeddings")
 
-EMBEDDING_MODEL = "text-embedding-3-small"
+OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
 CHUNK_CHARS = 4000
 
 
 class EmbeddingsNotConfiguredError(RuntimeError):
-    """Raised when OPENAI_API_KEY isn't set."""
+    """Raised when neither OPENAI_API_KEY nor GOOGLE_API_KEY is set."""
 
 
 def embed_text(text: str) -> list[float]:
+    """OpenAI (paid, needs OPENAI_API_KEY) if configured -> Gemini's free-tier embedding model as
+    the fallback (also used directly when no OpenAI key is set). Both are requested at
+    EMBEDDING_DIM (768) so rows from either provider land in the same pgvector column shape and
+    stay cosine-comparable regardless of which one produced them -- see migration 0004."""
     settings = get_settings()
-    if not settings.openai_api_key:
-        raise EmbeddingsNotConfiguredError("OPENAI_API_KEY is not set")
-    return _embed_call(text)
+
+    if settings.openai_api_key:
+        try:
+            return _openai_embed_call(text)
+        except Exception as exc:
+            # e.g. no billing credits, rate-limited, circuit open -- Gemini's embedding model has
+            # a free tier, so a broken/unfunded paid key should degrade gracefully, not block the
+            # Script QA originality gate entirely.
+            logger.warning("embeddings.openai_failed_falling_back", error=str(exc))
+
+    if not settings.google_api_key:
+        raise EmbeddingsNotConfiguredError("neither OPENAI_API_KEY nor GOOGLE_API_KEY is set")
+    return _gemini_embed_call(text)
 
 
 @with_resilience(provider="openai_embeddings")
-def _embed_call(text: str) -> list[float]:
+def _openai_embed_call(text: str) -> list[float]:
     from openai import OpenAI
 
     client = OpenAI(api_key=get_settings().openai_api_key)
-    response = client.embeddings.create(model=EMBEDDING_MODEL, input=text)
+    response = client.embeddings.create(model=OPENAI_EMBEDDING_MODEL, input=text, dimensions=EMBEDDING_DIM)
     return response.data[0].embedding
+
+
+@with_resilience(provider="gemini_embeddings")
+def _gemini_embed_call(text: str) -> list[float]:
+    from google import genai
+    from google.genai import types
+
+    settings = get_settings()
+    client = genai.Client(api_key=settings.google_api_key)
+    response = client.models.embed_content(
+        model=settings.gemini_embedding_model,
+        contents=text,
+        config=types.EmbedContentConfig(output_dimensionality=EMBEDDING_DIM),
+    )
+    return response.embeddings[0].values
 
 
 def chunk_text(text: str, max_chars: int = CHUNK_CHARS) -> list[str]:

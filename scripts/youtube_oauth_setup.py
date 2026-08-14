@@ -9,6 +9,10 @@ own channel — the resulting refresh token never leaves your machine, it's writ
 
 Needs YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET already set in .env first: Google Cloud Console ->
 APIs & Services -> Credentials -> Create Credentials -> OAuth client ID -> Desktop app.
+
+If you already ran this once before the yt-analytics.readonly scope below existed, re-run it —
+the old refresh token doesn't cover Analytics API calls and analytics_report() will fail with a
+403 until you mint a new one.
 """
 import sys
 from pathlib import Path
@@ -20,8 +24,9 @@ from googleapiclient.discovery import build
 from core.settings import get_settings
 
 SCOPES = [
-    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube",  # full manage scope: upload + delete + thumbnails
     "https://www.googleapis.com/auth/youtube.readonly",
+    "https://www.googleapis.com/auth/yt-analytics.readonly",
 ]
 ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 
