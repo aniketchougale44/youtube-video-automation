@@ -105,6 +105,10 @@ def _fake_generate_image(prompt: str, output_path: str, size: str = "1024x1024")
     return output_path
 
 
+def _fake_openai_edit(base_image_path: str, prompt: str, output_path: str) -> None:
+    Image.new("RGB", (64, 64), color=(128, 128, 128)).save(output_path)
+
+
 def _make_fake_media_path(tmp_dir: str):
     def _fake_media_path(*parts: str) -> str:
         path = os.path.join(tmp_dir, *parts)
@@ -170,12 +174,19 @@ def mock_external_apis(monkeypatch, tmp_path):
     monkeypatch.setattr("tools.stock_media.search_videos", lambda keywords, per_page=5: [])
     monkeypatch.setattr("tools.stock_media.search_images", lambda keywords, per_page=5: [])
     monkeypatch.setattr("tools.image_gen.generate_image", _fake_generate_image)
+    # avoid a real OpenAI network call from tools.character_assets._openai_edit regardless of
+    # whether OPENAI_API_KEY happens to be set in the developer's local .env
+    monkeypatch.setattr("tools.character_assets._openai_edit", _fake_openai_edit)
 
     # asset_visual_node / thumbnail_node stay real (fast once image_gen is mocked) but still write
     # files via media_path() -- redirect those into pytest's auto-cleaned tmp_path
     fake_media_path = _make_fake_media_path(str(tmp_path))
     monkeypatch.setattr("graph.nodes.visual.media_path", fake_media_path)
     monkeypatch.setattr("graph.nodes.publish.media_path", fake_media_path)
+    # tools.character_assets caches the mascot pack on disk keyed only by character name (not
+    # run_id), so without this redirect it would write into (and read stale files back from) the
+    # real project media_dir across test runs instead of pytest's auto-cleaned tmp_path
+    monkeypatch.setattr("tools.character_assets.media_path", fake_media_path)
 
     # voiceover/video_assembly: replaced outright, see module docstring
     monkeypatch.setattr("graph.builder.voiceover_node", _fake_voiceover_node)
@@ -185,3 +196,5 @@ def mock_external_apis(monkeypatch, tmp_path):
     # real spec check passes -- that also means upload_node's real branch (file exists) now runs
     # in tests, so the actual YouTube OAuth upload call itself must be mocked
     monkeypatch.setattr("tools.youtube.resumable_upload", lambda **kwargs: "fake_yt_id_000")
+    monkeypatch.setattr("tools.youtube.get_or_create_playlist", lambda **kwargs: "fake_playlist_id_000")
+    monkeypatch.setattr("tools.youtube.add_video_to_playlist", lambda *args, **kwargs: None)

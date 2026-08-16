@@ -96,7 +96,12 @@ _TREND_SYNTHESIS_SYSTEM_PROMPT = (
     "angles a different channel could make videos about, inspired by the same underlying interest "
     "these trending videos reveal. Never propose a title, script, or description that copies or "
     "closely imitates any specific trending video — extract the underlying topic/format/gap, not "
-    "the video itself. Each idea must cite which trending video IDs informed it."
+    "the video itself. Also never propose a remix, cover, parody, or retelling of an existing song, "
+    "rhyme, or story (e.g. 'a modern remix of classic nursery rhymes') — the lyrics/plot of the "
+    "source material are what make it recognizable, so any script written for that idea ends up "
+    "near-identical to the original and fails downstream originality review. Propose wholly new "
+    "songs/stories/formats instead, merely inspired by the same theme. Each idea must cite which "
+    "trending video IDs informed it."
 )
 
 

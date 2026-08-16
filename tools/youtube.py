@@ -285,7 +285,10 @@ def _upload_video_call(youtube, file_path: str, metadata: dict, visibility: str)
             "description": metadata.get("description", ""),
             "tags": metadata.get("tags", []),
         },
-        "status": {"privacyStatus": visibility},
+        "status": {
+            "privacyStatus": visibility,
+            "selfDeclaredMadeForKids": get_settings().youtube_made_for_kids,
+        },
     }
     media = MediaFileUpload(file_path, chunksize=-1, resumable=True)
     request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
@@ -302,3 +305,59 @@ def _set_thumbnail_call(youtube, video_id: str, thumbnail_path: str) -> None:
 
     quota.consume("thumbnails.set")
     youtube.thumbnails().set(videoId=video_id, media_body=MediaFileUpload(thumbnail_path)).execute()
+
+
+def set_visibility(video_id: str, visibility: str) -> None:
+    """Updates an already-uploaded video's privacy status (e.g. "unlisted" -> "public")."""
+    _set_visibility_call(_oauth_client(), video_id, visibility)
+
+
+@with_resilience(provider="youtube_upload_api")
+def _set_visibility_call(youtube, video_id: str, visibility: str) -> None:
+    quota.consume("videos.update")
+    youtube.videos().update(part="status", body={"id": video_id, "status": {"privacyStatus": visibility}}).execute()
+    logger.info("youtube.visibility.updated", video_id=video_id, visibility=visibility)
+
+
+def get_or_create_playlist(title: str, description: str = "", privacy_status: str = "public") -> str:
+    """Returns the id of the channel's playlist named `title`, creating it (once) if it doesn't
+    exist yet. Matching is by exact title against the channel's own playlists (mine=True), so
+    repeated uploads into the same niche (e.g. nursery content) land in one playlist instead of
+    each upload minting a duplicate."""
+    return _get_or_create_playlist_call(_oauth_client(), title, description, privacy_status)
+
+
+@with_resilience(provider="youtube_playlist_api")
+def _get_or_create_playlist_call(youtube, title: str, description: str, privacy_status: str) -> str:
+    quota.consume("playlists.list")
+    response = youtube.playlists().list(part="snippet", mine=True, maxResults=50).execute()
+    for item in response.get("items", []):
+        if item["snippet"]["title"] == title:
+            return item["id"]
+
+    quota.consume("playlists.insert")
+    body = {
+        "snippet": {"title": title, "description": description},
+        "status": {"privacyStatus": privacy_status},
+    }
+    response = youtube.playlists().insert(part="snippet,status", body=body).execute()
+    playlist_id = response["id"]
+    logger.info("youtube.playlist.created", playlist_id=playlist_id, title=title)
+    return playlist_id
+
+
+def add_video_to_playlist(playlist_id: str, video_id: str) -> None:
+    _add_video_to_playlist_call(_oauth_client(), playlist_id, video_id)
+
+
+@with_resilience(provider="youtube_playlist_api")
+def _add_video_to_playlist_call(youtube, playlist_id: str, video_id: str) -> None:
+    quota.consume("playlistItems.insert")
+    body = {
+        "snippet": {
+            "playlistId": playlist_id,
+            "resourceId": {"kind": "youtube#video", "videoId": video_id},
+        }
+    }
+    youtube.playlistItems().insert(part="snippet", body=body).execute()
+    logger.info("youtube.playlist.video_added", playlist_id=playlist_id, video_id=video_id)

@@ -26,6 +26,7 @@ from agents.schemas.publish import (
 from agents.schemas.script import ScriptBeat, ScriptOutput
 from core.llm import call_structured
 from core.logging import get_logger
+from core.settings import get_settings
 from graph.nodes._helpers import (
     bumped_retry_counts,
     consume_force_reject,
@@ -221,9 +222,20 @@ def critic_compliance_node(state: PipelineState) -> dict:
         metadata = MetadataOutput.model_validate(state["metadata_output"])
         assembly = AssemblyOutput.model_validate(state["assembly_output"])
         qa_result = state.get("script_qa_result") or {}
+        settings = get_settings()
 
-        # Proxy, NOT a real Content-ID scan (see module docstring).
-        copyright_risk_score = round(qa_result.get("max_similarity_score", 0.0) * 10, 2)
+        # Proxy, NOT a real Content-ID scan (see module docstring). Scaled to the same 0-10 range
+        # critic_script_qa_node's originality_score uses, and gated at the same cutoff
+        # (originality_similarity_threshold) -- this is the identical similarity signal QA already
+        # evaluated, so compliance must agree with QA's verdict rather than re-litigating the same
+        # number against a stricter, independently-hardcoded bar (that combination silently failed
+        # every script QA had just passed). Must read external_similarity_score specifically, not
+        # max_similarity_score: the latter also folds in similarity to our OWN back catalog, which
+        # QA judges at a much looser bar (settings.originality_own_catalog_similarity_threshold) --
+        # reading max_similarity_score here reintroduced the exact same "silently fails everything
+        # QA just passed" bug the comment above describes, just one similarity source later.
+        copyright_risk_score = round(qa_result.get("external_similarity_score", 0.0) * 10, 2)
+        copyright_risk_threshold = round(settings.originality_similarity_threshold * 10, 2)
 
         prompt = (
             f"Title: {metadata.selected_title}\nDescription: {metadata.description}\n\n"
@@ -246,7 +258,11 @@ def critic_compliance_node(state: PipelineState) -> dict:
         spec_check_ok = render_exists and assembly.resolution == "1920x1080" and assembly.fps == 30 and not spec_notes
 
         blocking_reasons = (
-            ([f"copyright risk proxy {copyright_risk_score:.1f}/10 exceeds threshold"] if copyright_risk_score > 7.0 else [])
+            (
+                [f"copyright risk proxy {copyright_risk_score:.1f}/10 exceeds threshold {copyright_risk_threshold:.1f}/10"]
+                if copyright_risk_score > copyright_risk_threshold
+                else []
+            )
             + guideline_check.flags
             + spec_notes
         )
@@ -325,8 +341,26 @@ def upload_node(state: PipelineState) -> dict:
             thumbnail_path=thumbnail_path,
             visibility=Visibility.UNLISTED.value,
         )
+
+        # Best-effort, like thumbnail_set above: the video itself already published successfully,
+        # which is the part that actually matters, so a playlist hiccup shouldn't fail the run.
+        playlist_id = None
+        settings = get_settings()
+        try:
+            playlist_id = youtube_tool.get_or_create_playlist(
+                title=settings.youtube_nursery_playlist_title,
+                description="Nursery rhymes and early-learning videos for toddlers and preschoolers.",
+            )
+            youtube_tool.add_video_to_playlist(playlist_id, video_id)
+        except Exception as exc:
+            logger.warning("upload.playlist_add_failed", video_id=video_id, error=str(exc))
+
         result = UploadResult(
-            youtube_video_id=video_id, status=UploadStatus.UPLOADED, visibility=Visibility.UNLISTED, quota_units_used=1600
+            youtube_video_id=video_id,
+            status=UploadStatus.UPLOADED,
+            visibility=Visibility.UNLISTED,
+            quota_units_used=1600,
+            playlist_id=playlist_id,
         )
     else:
         # video_assembly is still a stub (no real render file yet) — nothing exists to actually
@@ -338,5 +372,8 @@ def upload_node(state: PipelineState) -> dict:
 
     return {
         "upload_result": result.model_dump(mode="json"),
-        "trace": [trace, log_and_trace(STAGE_UPLOAD, "complete", youtube_video_id=result.youtube_video_id)],
+        "trace": [
+            trace,
+            log_and_trace(STAGE_UPLOAD, "complete", youtube_video_id=result.youtube_video_id, playlist_id=result.playlist_id),
+        ],
     }

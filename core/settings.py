@@ -17,7 +17,13 @@ class Settings(BaseSettings):
     quality_score_threshold: float = 8.5
     max_critic_retries: int = 3
     originality_similarity_threshold: float = 0.82  # cosine similarity (0-1); separate scale from
-    # quality_score_threshold (0-10) — don't conflate the two
+    # quality_score_threshold (0-10) — don't conflate the two. Applied to matches against
+    # transcript_embeddings (real external/other-channel content) -- genuine plagiarism protection.
+    originality_own_catalog_similarity_threshold: float = 0.95  # applied to matches against this
+    # channel's OWN script_embeddings back-catalog instead. Deliberately much looser than the
+    # external threshold: a narrow, format-consistent niche (e.g. nursery rhymes for toddlers)
+    # legitimately produces similar-sounding scripts episode to episode -- that's genre convention,
+    # not plagiarism -- so gating it at the strict external bar rejected every draft outright.
 
     # Channel strategy
     channel_goals: str = (
@@ -64,6 +70,14 @@ class Settings(BaseSettings):
     youtube_channel_id: str = ""
     youtube_api_key: str = ""
     youtube_daily_quota_units: int = 10_000
+    # Every upload is added to this playlist (created on the channel the first time it's needed,
+    # then reused by exact title match) -- keeps nursery/preschool content grouped separately from
+    # the rest of the channel.
+    youtube_nursery_playlist_title: str = "Nursery Rhymes & Learning for Toddlers"
+    # This channel's content is always made-for-kids (see channel_goals) -- explicitly self-declare
+    # it on every upload rather than relying on YouTube's automatic classifier, which does not
+    # consistently mark every upload as made-for-kids on its own.
+    youtube_made_for_kids: bool = True
 
     # Research
     tavily_api_key: str = ""
@@ -91,6 +105,15 @@ class Settings(BaseSettings):
     openai_image_model: str = "gpt-image-1"
     stability_api_key: str = ""
     replicate_api_token: str = ""
+
+    # Mascot character (see tools/character_assets.py): a small pose pack generated once and
+    # cached under media_dir/characters/, then reused by every render -- this replaces the old
+    # single-AI-still-plus-Ken-Burns-pan for AI_IMAGE beats with an actually-animated character.
+    mascot_character_name: str = "Mimi the Fox"
+    mascot_character_prompt: str = (
+        "Mimi the Fox: a cheerful, round-bodied orange fox cub with big sparkling brown eyes, a "
+        "white belly and cheek patches, small rounded ears, and a red-and-white striped overall"
+    )
 
     # Notifications
     slack_webhook_url: str = ""

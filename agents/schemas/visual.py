@@ -37,6 +37,7 @@ class AssetType(StrEnum):
     STOCK_VIDEO = "stock_video"
     STOCK_IMAGE = "stock_image"
     AI_IMAGE = "ai_image"
+    CHARACTER_ANIMATION = "character_animation"
 
 
 class SourcedAsset(BaseModel):

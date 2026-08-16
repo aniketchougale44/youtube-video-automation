@@ -58,6 +58,12 @@ class ScriptQAResult(BaseModel):
     stage: PipelineStage = PipelineStage.CRITIC_SCRIPT_QA
     originality_score: float = Field(ge=0, le=10)
     max_similarity_score: float = Field(ge=0, le=1)
+    # Transcript-only (real external/other-channel content) max similarity -- this, not
+    # max_similarity_score, is the actual copyright-risk signal: max_similarity_score also folds in
+    # similarity to our OWN back catalog, which is judged at a much looser threshold (see
+    # settings.originality_own_catalog_similarity_threshold) and isn't a plagiarism concern.
+    # critic_compliance_node's copyright-risk proxy must read this field, not max_similarity_score.
+    external_similarity_score: float = Field(ge=0, le=1, default=0.0)
     similarity_matches: list[SimilarityMatch] = Field(default_factory=list)
     flagged_claims: list[ClaimFlag] = Field(default_factory=list)
     policy_flags: list[str] = Field(default_factory=list)

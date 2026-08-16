@@ -3,9 +3,11 @@
 The Script QA critic is the hard originality/plagiarism gate: embeds the draft and compares it
 against TranscriptEmbedding (top existing videos — currently unpopulated, no ingestion job exists
 yet; degrades gracefully to "no matches") and ScriptEmbedding (our own back catalog, populated by
-this node on every pass) via pgvector cosine similarity, rejecting above
-settings.originality_similarity_threshold. It also extracts checkable factual claims that
-fact_check_node then verifies.
+this node on every pass) via pgvector cosine similarity. Each is judged against its own threshold
+-- settings.originality_similarity_threshold (strict) for external transcripts, since that's real
+plagiarism risk, and settings.originality_own_catalog_similarity_threshold (loose) for our own back
+catalog, since a narrow, format-consistent channel niche legitimately sounds similar episode to
+episode. It also extracts checkable factual claims that fact_check_node then verifies.
 """
 from pydantic import BaseModel, Field
 
@@ -152,6 +154,7 @@ def critic_script_qa_node(state: PipelineState) -> dict:
         result = ScriptQAResult(
             originality_score=3.0,
             max_similarity_score=0.9,
+            external_similarity_score=0.9,
             similarity_matches=[],
             flagged_claims=[],
             policy_flags=["[STUB] forced rejection for demo"],
@@ -167,8 +170,18 @@ def critic_script_qa_node(state: PipelineState) -> dict:
         transcript_matches = embeddings_tool.most_similar_transcript(vector)
         script_matches = embeddings_tool.most_similar_script(vector, exclude_run_id=state["run_id"])
         all_matches = transcript_matches + script_matches
-        max_sim = max((score for _source, score in all_matches), default=0.0)
-        passed = max_sim <= settings.originality_similarity_threshold
+
+        # External transcripts (real other-channel content) are held to the strict bar -- genuine
+        # plagiarism protection. Our own back catalog is held to a much looser bar: see
+        # settings.originality_own_catalog_similarity_threshold for why comparing it at the
+        # external bar was rejecting every draft outright on a narrow, format-consistent channel.
+        transcript_max = max((score for _source, score in transcript_matches), default=0.0)
+        script_max = max((score for _source, score in script_matches), default=0.0)
+        passed = (
+            transcript_max <= settings.originality_similarity_threshold
+            and script_max <= settings.originality_own_catalog_similarity_threshold
+        )
+        max_sim = max(transcript_max, script_max)
 
         similarity_matches = [
             SimilarityMatch(source_video_id=source, similarity_score=score)
@@ -190,6 +203,7 @@ def critic_script_qa_node(state: PipelineState) -> dict:
         result = ScriptQAResult(
             originality_score=round((1 - max_sim) * 10, 2),
             max_similarity_score=round(max_sim, 4),
+            external_similarity_score=round(transcript_max, 4),
             similarity_matches=similarity_matches,
             flagged_claims=flagged_claims,
             policy_flags=[],
@@ -197,8 +211,15 @@ def critic_script_qa_node(state: PipelineState) -> dict:
             feedback_for_retry=(
                 None
                 if passed
-                else f"Originality too close to existing content (similarity={max_sim:.2f}); "
-                "rewrite the framing, examples, and wording to be more original."
+                else (
+                    f"Originality too close to existing external content (similarity={transcript_max:.2f}); "
+                    "rewrite the framing, examples, and wording to be more original."
+                    if transcript_max > settings.originality_similarity_threshold
+                    else (
+                        f"Too close to one of this channel's own recent scripts "
+                        f"(similarity={script_max:.2f}); vary the wording and examples from past episodes."
+                    )
+                )
             ),
             retry_count=retry_count,
         )

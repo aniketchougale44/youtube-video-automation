@@ -1,10 +1,12 @@
 """Visual Planning Agent + Asset/Visual Agent — real logic.
 
-visual_planning_node routes each beat to real stock footage (BROLL) or an AI-generated still
+visual_planning_node routes each beat to real stock footage (BROLL) or an animated-mascot scene
 (AI_IMAGE) based on content — concrete/real-world beats get stock search keywords, abstract/
-conceptual beats get an AI-image prompt. asset_visual_node sources accordingly, falling back from
-stock -> AI generation -> a "no asset" placeholder (never crashes the run for a sourcing miss;
-video_assembly_node renders a solid-color placeholder clip for beats with no asset).
+conceptual beats get an AI-image prompt (used only as backdrop-scene context; the mascot itself
+comes from the shared character pack, not a per-beat generation). asset_visual_node sources
+accordingly, falling back from stock -> mascot character animation -> a "no asset" placeholder
+(never crashes the run for a sourcing miss; video_assembly_node renders a solid-color placeholder
+clip for beats with no asset).
 """
 import httpx
 from pydantic import BaseModel, Field
@@ -22,7 +24,7 @@ from core.llm import call_structured
 from core.logging import get_logger
 from graph.nodes._helpers import log_and_trace
 from graph.state import PipelineState
-from tools import image_gen as image_gen_tool
+from tools import character_assets as character_assets_tool
 from tools import stock_media as stock_media_tool
 from tools.media_paths import media_path
 
@@ -135,21 +137,21 @@ def _try_stock(scene: SceneVisualPlan, run_id: str) -> SourcedAsset | None:
     )
 
 
-def _try_ai_image(scene: SceneVisualPlan, run_id: str) -> SourcedAsset | None:
-    prompt = scene.ai_image_prompt or scene.description
-    path = media_path(run_id, "assets", f"beat_{scene.beat_index}.png")
+def _try_character_animation(scene: SceneVisualPlan) -> SourcedAsset | None:
+    """No per-beat file to source -- just makes sure the shared mascot pose pack exists (a no-op
+    after the first call ever, since tools.character_assets caches it on disk)."""
     try:
-        image_gen_tool.generate_image(prompt, output_path=path)
+        character_assets_tool.get_character_pack()
     except Exception as exc:
-        logger.warning("asset_visual.ai_image_failed", beat_index=scene.beat_index, error=str(exc))
+        logger.warning("asset_visual.character_pack_failed", beat_index=scene.beat_index, error=str(exc))
         return None
 
     return SourcedAsset(
         beat_index=scene.beat_index,
         scene_type=scene.scene_type,
-        asset_type=AssetType.AI_IMAGE,
-        source="openai-image",
-        local_path=path,
+        asset_type=AssetType.CHARACTER_ANIMATION,
+        source="mascot-character",
+        local_path=None,
         license="generated",
         attribution_required=False,
     )
@@ -167,7 +169,7 @@ def asset_visual_node(state: PipelineState) -> dict:
         if scene.scene_type in (SceneType.BROLL, SceneType.CHART, SceneType.MOTION_GRAPHIC):
             asset = _try_stock(scene, run_id)
         if asset is None:
-            asset = _try_ai_image(scene, run_id)
+            asset = _try_character_animation(scene)
         if asset is None:
             logger.error("asset_visual.no_asset_sourced", beat_index=scene.beat_index)
             asset = SourcedAsset(

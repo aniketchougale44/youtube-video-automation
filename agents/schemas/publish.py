@@ -107,5 +107,6 @@ class UploadResult(BaseModel):
     status: UploadStatus
     visibility: Visibility
     quota_units_used: int = 0
+    playlist_id: str | None = None
     error: str | None = None
     uploaded_at: datetime = Field(default_factory=utcnow)
