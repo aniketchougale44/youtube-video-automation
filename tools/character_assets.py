@@ -103,6 +103,27 @@ def get_character_pack(force: bool = False) -> dict[str, str]:
     return paths
 
 
+def compose_static(pose: str, width: int, height: int, backdrop_rgb: tuple[int, int, int], sprite_height_fraction: float = 0.85):
+    """Composites one cached mascot pose onto a flat-color backdrop as a single still image.
+
+    Used for thumbnails (graph/nodes/publish.py thumbnail_node) in place of a fresh AI generation
+    from a free-text prompt: every pixel here is either the pre-vetted mascot asset or a solid
+    color, so there's no way for it to drift into unsafe or off-brand content the way an
+    unconstrained text-to-image prompt can (see thumbnail_node's docstring for the incident that
+    motivated this)."""
+    pack = get_character_pack()
+    sprite = Image.open(pack[pose]).convert("RGBA")
+    sprite_h = int(height * sprite_height_fraction)
+    scale = sprite_h / sprite.height
+    sprite = sprite.resize((max(1, int(sprite.width * scale)), sprite_h))
+
+    backdrop = Image.new("RGBA", (width, height), (*backdrop_rgb, 255))
+    x = (width - sprite.width) // 2
+    y = height - sprite.height
+    backdrop.alpha_composite(sprite, (x, y))
+    return backdrop.convert("RGB")
+
+
 @with_resilience(provider="character_assets_openai_edit")
 def _openai_edit(base_image_path: str, prompt: str, output_path: str) -> None:
     import base64

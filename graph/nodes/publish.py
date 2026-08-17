@@ -34,7 +34,7 @@ from graph.nodes._helpers import (
     log_and_trace,
 )
 from graph.state import PipelineState
-from tools import image_gen as image_gen_tool
+from tools import character_assets as character_assets_tool
 from tools import youtube as youtube_tool
 from tools.fonts import resolve_font_path
 from tools.media_paths import media_path
@@ -112,11 +112,21 @@ def metadata_seo_node(state: PipelineState) -> dict:
     }
 
 
-# --- Thumbnail: real AI image gen + best-effort Pillow title overlay ---
-
-_THUMBNAIL_PROMPT_VARIANTS = [
-    "A bold, high-contrast YouTube thumbnail illustrating: {hook}. Vivid colors, a clear focal subject, no text.",
-    "A curiosity-provoking YouTube thumbnail hinting at: {hook}. Dramatic lighting, no text.",
+# --- Thumbnail: mascot pose composited onto a flat backdrop + Pillow title overlay ---
+#
+# Previously this generated a fresh AI image per candidate from a free-text prompt ("A
+# curiosity-provoking YouTube thumbnail hinting at: {hook}. Dramatic lighting, no text.") via the
+# same keyless Pollinations fallback everything else here uses. On a real run that produced a
+# photorealistic, sexualized image as one of the two candidates -- nothing in the pipeline screens
+# generated thumbnail *images* for safety (critic_compliance_node's guideline check only reads
+# script text/metadata through an LLM, never the pixels), and a vague prompt with no style/subject
+# constraint gives a filter-less free image model room to drift into exactly that. Compositing the
+# same pre-vetted mascot pack already used in the video (tools.character_assets.compose_static)
+# instead eliminates the risk at the source: every candidate is built from an asset a human already
+# looked at plus a solid color, so there is nothing left for a fresh generation to get wrong.
+_THUMBNAIL_VARIANTS = [
+    ("wave", (255, 214, 165)),  # peach backdrop, waving pose
+    ("talk", (168, 218, 220)),  # sky backdrop, talking pose
 ]
 
 
@@ -153,16 +163,14 @@ def _overlay_title(path: str, title: str) -> None:
 def thumbnail_node(state: PipelineState) -> dict:
     trace = log_and_trace(STAGE_THUMBNAIL, "start")
 
-    script = ScriptOutput.model_validate(state["script_output"])
     metadata = MetadataOutput.model_validate(state["metadata_output"])
     run_id = state["run_id"]
 
     candidates = []
-    for index, template in enumerate(_THUMBNAIL_PROMPT_VARIANTS):
-        prompt = template.format(hook=script.hook)
+    for index, (pose, backdrop_rgb) in enumerate(_THUMBNAIL_VARIANTS):
         path = media_path(run_id, "thumbnails", f"candidate_{index}.png")
         try:
-            image_gen_tool.generate_image(prompt, output_path=path, size="1536x1024")
+            character_assets_tool.compose_static(pose, 1536, 1024, backdrop_rgb).save(path)
         except Exception as exc:
             logger.warning("thumbnail.generate_failed", index=index, error=str(exc))
             continue
@@ -174,7 +182,7 @@ def thumbnail_node(state: PipelineState) -> dict:
             logger.warning("thumbnail.overlay_failed", index=index, error=str(exc))
             text_overlay = ""  # generated image kept, just without the text overlay
 
-        candidates.append(ThumbnailCandidate(image_path=path, prompt_used=prompt, text_overlay=text_overlay))
+        candidates.append(ThumbnailCandidate(image_path=path, prompt_used=f"mascot:{pose}", text_overlay=text_overlay))
 
     output = ThumbnailOutput(candidates=candidates)
 
