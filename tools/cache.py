@@ -28,3 +28,16 @@ def cache_get_json(key: str) -> Any | None:
 
 def cache_set_json(key: str, value: Any, ttl_seconds: int = DEFAULT_TTL_SECONDS) -> None:
     _redis().set(key, json.dumps(value), ex=ttl_seconds)
+
+
+def cache_scan_json(prefix: str) -> list[Any]:
+    """Returns the parsed JSON value of every key starting with prefix -- for a caller that needs
+    to enumerate a whole key family (e.g. tools.script_progress's per-script run status) rather
+    than fetch one known key. SCAN-based (not KEYS): non-blocking, safe against a large keyspace."""
+    client = _redis()
+    values = []
+    for key in client.scan_iter(match=f"{prefix}*"):
+        raw = client.get(key)
+        if raw is not None:
+            values.append(json.loads(raw))
+    return values

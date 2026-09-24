@@ -23,22 +23,22 @@ from tools.image_gen import generate_image as _real_generate_image
 
 
 def _settings(**overrides) -> types.SimpleNamespace:
-    defaults = dict(
-        anthropic_api_key="", llm_primary_model="claude-sonnet-4-5",
-        openai_api_key="", llm_fallback_model="gpt-4o-mini",
-        groq_api_key="", llm_groq_model="llama-3.3-70b-versatile",
-        google_api_key="", llm_gemini_model="gemini-2.0-flash",
-        gemini_embedding_model="models/gemini-embedding-001",
-        image_gen_provider="pollinations", openai_image_model="gpt-image-1",
-        tts_provider="edge", openai_tts_model="tts-1", openai_tts_voice="alloy",
-        edge_tts_voice="en-US-AndrewNeural",
-    )
+    defaults = {
+        "anthropic_api_key": "", "llm_primary_model": "claude-sonnet-4-5",
+        "openai_api_key": "", "llm_fallback_model": "gpt-4o-mini",
+        "groq_api_key": "", "llm_groq_model": "llama-3.3-70b-versatile",
+        "google_api_key": "", "llm_gemini_model": "gemini-2.0-flash",
+        "gemini_embedding_model": "models/gemini-embedding-001",
+        "image_gen_provider": "pollinations", "openai_image_model": "gpt-image-1",
+        "tts_provider": "edge", "openai_tts_model": "tts-1", "openai_tts_voice": "alloy",
+        "edge_tts_voice": "en-US-AndrewNeural",
+    }
     defaults.update(overrides)
     return types.SimpleNamespace(**defaults)
 
 
 def test_llm_provider_chain_skips_unconfigured_providers(monkeypatch):
-    import core.llm as llm
+    from core import llm
 
     monkeypatch.setattr("core.llm.get_settings", lambda: _settings(groq_api_key="fake-groq-key"))
 
@@ -49,8 +49,9 @@ def test_llm_provider_chain_skips_unconfigured_providers(monkeypatch):
 
 
 def test_llm_call_structured_falls_through_to_first_configured_provider(monkeypatch):
-    import core.llm as llm
     from pydantic import BaseModel
+
+    from core import llm
 
     class _Out(BaseModel):
         value: str
@@ -75,8 +76,9 @@ def test_llm_call_structured_falls_through_to_first_configured_provider(monkeypa
 
 
 def test_llm_call_structured_raises_when_nothing_configured(monkeypatch):
-    import core.llm as llm
     from pydantic import BaseModel
+
+    from core import llm
 
     class _Out(BaseModel):
         value: str
@@ -129,17 +131,17 @@ def test_image_gen_falls_back_to_pollinations_when_openai_fails(monkeypatch):
 
 
 def test_tts_uses_edge_when_no_openai_key(monkeypatch):
-    import tools.tts as tts
+    from tools import tts
 
     monkeypatch.setattr("tools.tts.get_settings", lambda: _settings(tts_provider="edge"))
-    monkeypatch.setattr("tools.tts._edge_call", lambda text, output_path, voice: output_path)
+    monkeypatch.setattr("tools.tts._edge_call", lambda text, output_path, voice, rate="+0%": output_path)
 
     result = tts.synthesize("hello", "out.mp3")
     assert result == "out.mp3"
 
 
 def test_tts_falls_back_to_edge_when_openai_fails(monkeypatch):
-    import tools.tts as tts
+    from tools import tts
 
     monkeypatch.setattr(
         "tools.tts.get_settings", lambda: _settings(tts_provider="openai", openai_api_key="fake-key")
@@ -150,7 +152,7 @@ def test_tts_falls_back_to_edge_when_openai_fails(monkeypatch):
 
     calls = {}
 
-    def _edge(text, output_path, voice):
+    def _edge(text, output_path, voice, rate="+0%"):
         calls["used"] = True
         return output_path
 

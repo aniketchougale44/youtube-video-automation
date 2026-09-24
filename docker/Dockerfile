@@ -14,6 +14,7 @@ RUN apt-get update -o Acquire::Retries=5 && apt-get install -y -o Acquire::Retri
 
 RUN apt-get update -o Acquire::Retries=5 && apt-get install -y -o Acquire::Retries=5 --no-install-recommends \
         ffmpeg \
+        fonts-noto-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml alembic.ini ./

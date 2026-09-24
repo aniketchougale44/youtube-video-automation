@@ -15,7 +15,10 @@ from tools.resilience import with_resilience
 logger = get_logger("tools.tts")
 
 
-def synthesize(text: str, output_path: str, voice: str | None = None) -> str:
+def synthesize(text: str, output_path: str, voice: str | None = None, rate: str = "+0%") -> str:
+    """rate is an edge-tts-style relative speed offset (e.g. "-8%") -- a touch slower than the
+    default reads as a more natural, unhurried storyteller cadence instead of a rushed TTS voice.
+    Ignored on the openai path (its API has no matching per-call parameter)."""
     settings = get_settings()
 
     if settings.tts_provider == "openai" and settings.openai_api_key:
@@ -26,7 +29,7 @@ def synthesize(text: str, output_path: str, voice: str | None = None) -> str:
             # so a broken/unfunded paid key should degrade gracefully, not fail the run.
             logger.warning("tts.openai_failed_falling_back", error=str(exc))
 
-    return _edge_call(text, output_path, voice or settings.edge_tts_voice)
+    return _edge_call(text, output_path, voice or settings.edge_tts_voice, rate)
 
 
 @with_resilience(provider="openai_tts")
@@ -42,12 +45,12 @@ def _openai_call(text: str, output_path: str, voice: str) -> str:
 
 
 @with_resilience(provider="edge_tts")
-def _edge_call(text: str, output_path: str, voice: str) -> str:
+def _edge_call(text: str, output_path: str, voice: str, rate: str = "+0%") -> str:
     import edge_tts
 
     async def _run() -> None:
-        await edge_tts.Communicate(text, voice).save(output_path)
+        await edge_tts.Communicate(text, voice, rate=rate).save(output_path)
 
     asyncio.run(_run())
-    logger.info("tts.synthesize", provider="edge", chars=len(text), output_path=output_path, voice=voice)
+    logger.info("tts.synthesize", provider="edge", chars=len(text), output_path=output_path, voice=voice, rate=rate)
     return output_path

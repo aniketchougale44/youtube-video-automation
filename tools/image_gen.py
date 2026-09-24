@@ -3,8 +3,9 @@
 Provider order: settings.image_gen_provider ("openai") if OPENAI_API_KEY is set -> Pollinations.ai
 (https://pollinations.ai, free, keyless, no signup) as the always-available fallback, so a run
 never has to skip visuals/thumbnails just because no paid image-gen key is configured. stability/
-replicate remain out of scope (fail loudly rather than silently no-op) since neither provides a
-meaningful free tier worth wiring alongside Pollinations.
+replicate aren't wired (neither has a free tier worth carrying alongside Pollinations); if either
+is set as the provider we log once and use the Pollinations fallback rather than crashing an
+otherwise-fine render on a stale env var.
 """
 import base64
 from urllib.parse import quote
@@ -22,7 +23,10 @@ def generate_image(prompt: str, output_path: str, size: str = "1024x1024") -> st
     settings = get_settings()
 
     if settings.image_gen_provider in ("stability", "replicate"):
-        raise NotImplementedError(f"image_gen_provider={settings.image_gen_provider!r} is not implemented")
+        logger.warning(
+            "image_gen.provider_not_wired_using_pollinations", provider=settings.image_gen_provider
+        )
+        return _pollinations_call(prompt, output_path, size)
 
     if settings.image_gen_provider == "openai" and settings.openai_api_key:
         try:
