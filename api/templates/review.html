@@ -1,53 +1,155 @@
 {% extends "base.html" %}
 {% block title %}Review {{ run.id }}{% endblock %}
 {% block content %}
-  <p><a href="/dashboard/">← back</a></p>
-  <h3>Run <code>{{ run.id }}</code></h3>
-  <p>Status: <span class="badge badge-{{ run.status.value }}">{{ run.status.value }}</span></p>
+  {% set awaiting = run.status.value == "awaiting_approval" %}
+  {% set cr = packet.compliance_result if packet else none %}
+
+  <p><a href="/dashboard/">← back to dashboard</a></p>
+
+  <div class="section-head">
+    <h3>{{ (packet.title if packet else none) or (run.selected_topic or {}).get("title") or "Run" }}</h3>
+    <span class="badge badge-{{ run.status.value }}"><span class="badge-dot"></span>{{ run.status.value }}</span>
+  </div>
+  <p class="stage-label"><code>{{ run.id }}</code></p>
+
+  <div class="card">
+    <dl class="kv">
+      <dt>Created</dt><dd>{{ run.created_at.strftime("%Y-%m-%d %H:%M UTC") if run.created_at else "—" }}</dd>
+      <dt>Last update</dt><dd>{{ run.updated_at.strftime("%Y-%m-%d %H:%M UTC") if run.updated_at else "—" }}</dd>
+      <dt>Elapsed</dt>
+      <dd>
+        {%- if duration_seconds is not none -%}
+          {%- if duration_seconds < 60 -%}{{ duration_seconds | round | int }}s
+          {%- elif duration_seconds < 3600 -%}{{ (duration_seconds // 60) | int }}m {{ (duration_seconds % 60) | round | int }}s
+          {%- else -%}{{ (duration_seconds // 3600) | int }}h {{ ((duration_seconds % 3600) // 60) | int }}m
+          {%- endif -%}
+        {%- else -%}—{%- endif -%}
+      </dd>
+      <dt>Cost</dt><dd>${{ "%.2f"|format(cost_usd) }}</dd>
+      <dt>Video</dt>
+      <dd>
+        {% if youtube_url %}<a class="yt-chip" href="{{ youtube_url }}" target="_blank" rel="noopener">▶ watch on YouTube</a>
+          {% if video and video.visibility %}<span class="stage-label">({{ video.visibility.value }})</span>{% endif %}
+        {% else %}<span class="stage-label">not published yet</span>{% endif %}
+      </dd>
+      {% if video and video.duration_seconds %}
+      <dt>Runtime</dt><dd>{{ (video.duration_seconds // 60) | int }}m {{ (video.duration_seconds % 60) | round | int }}s</dd>
+      {% endif %}
+    </dl>
+
+    {% if render_url or script %}
+      <div class="review-split">
+        <div class="review-video">
+          {% if render_url %}
+            <video class="video-preview" controls preload="metadata" src="{{ render_url }}" style="width:100%"></video>
+          {% else %}
+            <p class="stage-label">Rendered video not available yet.</p>
+          {% endif %}
+        </div>
+        {% if script %}
+        <div class="review-script">
+          <h4>{{ script.working_title or "Script" }}</h4>
+          {% if script.hook %}<p class="script-hook"><b>HOOK</b> — {{ script.hook }}</p>{% endif %}
+          {% for b in script.beats %}
+          <div class="beat">
+            <div class="beat-meta">#{{ b.index }} · {{ b.type or "beat" }}{% if b.timestamp_seconds is not none %} · {{ (b.timestamp_seconds // 60) | int }}:{{ "%02d"|format((b.timestamp_seconds % 60) | int) }}{% endif %}</div>
+            <p>{{ b.voiceover_text }}</p>
+            {% if b.visual_cue %}<p class="cue">🎬 {{ b.visual_cue }}</p>{% endif %}
+          </div>
+          {% else %}
+          {% if script.full_text %}<pre class="script-fulltext">{{ script.full_text }}</pre>{% endif %}
+          {% endfor %}
+          {% if script.cta %}<p class="script-cta"><b>CTA</b> — {{ script.cta }}</p>{% endif %}
+        </div>
+        {% endif %}
+      </div>
+    {% endif %}
+
+    {% if run.error %}
+      <p class="stage-label" style="color:var(--critical)">Error: {{ run.error }}</p>
+    {% endif %}
+  </div>
 
   {% if not packet %}
-    <p><em>No pending approval packet found for this run (already decided, or checkpoint unavailable).</em></p>
+    <div class="card">
+      <p class="empty-state">No pending approval packet for this run (already decided, or the checkpoint is unavailable).</p>
+      {% if video and video.description %}
+        <h4>Description</h4>
+        <p>{{ video.description }}</p>
+      {% endif %}
+    </div>
   {% else %}
-  <div class="card">
-    <h4>Title</h4>
-    <p>{{ packet.title }}</p>
+    <div class="card">
+      <h4>Description</h4>
+      <p>{{ packet.description }}</p>
 
-    <h4>Description</h4>
-    <p>{{ packet.description }}</p>
-
-    <h4>Script summary (hook)</h4>
-    <p>{{ packet.script_summary }}</p>
-
-    <h4>Thumbnail candidates</h4>
-    <div class="thumbs">
-      {% for t in packet.thumbnail_options %}
-      <figure>
-        <div style="width:160px;height:90px;background:#8882;display:flex;align-items:center;justify-content:center;font-size:0.75rem;">{{ t }}</div>
-        <figcaption>#{{ loop.index0 }}</figcaption>
-      </figure>
-      {% endfor %}
+      <h4>Compliance</h4>
+      <div class="compliance-chips">
+        <span class="badge {{ 'badge-published' if cr.copyright_risk_score <= 3 else 'badge-failed' }}">copyright risk {{ cr.copyright_risk_score }}/10</span>
+        <span class="badge {{ 'badge-published' if cr.av_sync_ok else 'badge-failed' }}">AV sync {{ "ok" if cr.av_sync_ok else "issue" }}</span>
+        <span class="badge {{ 'badge-published' if cr.spec_check_ok else 'badge-failed' }}">spec {{ "ok" if cr.spec_check_ok else "issue" }}</span>
+        <span class="badge {{ 'badge-published' if cr.passed else 'badge-failed' }}">{{ "passed" if cr.passed else "blocked" }}</span>
+      </div>
+      {% if cr.community_guidelines_flags %}
+        <p class="stage-label">Guideline flags: {{ cr.community_guidelines_flags | join(", ") }}</p>
+      {% endif %}
+      {% if cr.blocking_reasons %}
+        <p class="stage-label">Blocking: {{ cr.blocking_reasons | join("; ") }}</p>
+      {% endif %}
+      {% if cr.spec_check_notes %}
+        <p class="stage-label">Spec notes: {{ cr.spec_check_notes | join("; ") }}</p>
+      {% endif %}
     </div>
 
-    <h4>Compliance check</h4>
-    <ul>
-      <li>Copyright risk score: {{ packet.compliance_result.copyright_risk_score }} / 10</li>
-      <li>AV sync OK: {{ packet.compliance_result.av_sync_ok }}</li>
-      <li>Spec check OK: {{ packet.compliance_result.spec_check_ok }}</li>
-      <li>Community guideline flags: {{ packet.compliance_result.community_guidelines_flags | join(", ") or "none" }}</li>
-    </ul>
-  </div>
-
-  <div class="actions">
-    <form method="post" action="/dashboard/{{ run.id }}/approve">
-      <input type="hidden" name="selected_thumbnail_index" value="0">
-      <input type="text" name="reviewer" placeholder="your name" required>
-      <button class="approve" type="submit">Approve & Publish</button>
-    </form>
-    <form method="post" action="/dashboard/{{ run.id }}/reject">
-      <input type="text" name="reviewer" placeholder="your name" required>
-      <input type="text" name="notes" placeholder="reason for rejection">
-      <button class="reject" type="submit">Reject</button>
-    </form>
-  </div>
+    <div class="card">
+      <h4>{{ "Pick a thumbnail, then approve" if awaiting else "Thumbnail candidates" }}</h4>
+      {% if awaiting %}
+      <form method="post" action="/dashboard/{{ run.id }}/approve">
+        <div class="thumbs">
+          {% for url in thumb_urls %}
+          <label class="thumb-pick">
+            <input type="radio" name="selected_thumbnail_index" value="{{ loop.index0 }}" {{ "checked" if loop.first }}>
+            {% if url %}
+              <img class="thumb-img" src="{{ url }}" alt="thumbnail {{ loop.index0 }}" loading="lazy"
+                   onerror="this.outerHTML='<span class=&quot;thumb-placeholder&quot;>image missing</span>'">
+            {% else %}
+              <span class="thumb-placeholder">not generated</span>
+            {% endif %}
+            <span class="pick-tag">use #{{ loop.index0 }}</span>
+          </label>
+          {% else %}
+          <p class="stage-label">No thumbnail candidates.</p>
+          {% endfor %}
+        </div>
+        <div class="actions">
+          <div>
+            <input type="text" name="reviewer" placeholder="your name" required>
+            <input type="text" name="notes" placeholder="notes (optional)">
+            <button class="approve" type="submit">Approve &amp; Publish</button>
+          </div>
+        </div>
+      </form>
+      <form method="post" action="/dashboard/{{ run.id }}/reject" class="actions" style="margin-top:1rem">
+        <div>
+          <input type="text" name="reviewer" placeholder="your name" required>
+          <input type="text" name="notes" placeholder="reason for rejection">
+          <button class="reject" type="submit">Reject</button>
+        </div>
+      </form>
+      {% else %}
+        <div class="thumbs">
+          {% for url in thumb_urls %}
+          <figure>
+            {% if url %}<img class="thumb-img" src="{{ url }}" alt="thumbnail {{ loop.index0 }}">
+            {% else %}<span class="thumb-placeholder">not generated</span>{% endif %}
+            <figcaption>#{{ loop.index0 }}</figcaption>
+          </figure>
+          {% else %}
+          <p class="stage-label">No thumbnail candidates.</p>
+          {% endfor %}
+        </div>
+        <p class="stage-label">This run is <strong>{{ run.status.value }}</strong> — no decision to make.</p>
+      {% endif %}
+    </div>
   {% endif %}
 {% endblock %}

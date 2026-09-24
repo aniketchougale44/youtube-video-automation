@@ -4,12 +4,18 @@ Deliberately its own process/container (see docker-compose.yml's `scheduler` ser
 APScheduler instance started inside the FastAPI app, so a slow API deploy/restart can never skip
 a cron firing and a stuck request can never block the schedule.
 """
+from datetime import UTC, datetime
+
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from core.logging import configure_logging, get_logger
 from core.settings import get_settings
-from scheduler.jobs import check_performance_windows, trigger_new_pipeline_run
+from scheduler.jobs import (
+    check_performance_windows,
+    renew_youtube_websub_subscription,
+    trigger_new_pipeline_run,
+)
 
 configure_logging()
 logger = get_logger("scheduler.beat")
@@ -33,6 +39,15 @@ def build_scheduler() -> BlockingScheduler:
         id="check_performance_windows",
         replace_existing=True,
         misfire_grace_time=600,
+    )
+    scheduler.add_job(
+        renew_youtube_websub_subscription,
+        "interval",
+        hours=24,
+        id="renew_youtube_websub_subscription",
+        replace_existing=True,
+        misfire_grace_time=3600,
+        next_run_time=datetime.now(UTC),  # also subscribe immediately on scheduler startup
     )
     return scheduler
 

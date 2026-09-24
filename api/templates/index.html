@@ -1,93 +1,78 @@
 {% extends "base.html" %}
 {% block title %}Dashboard — AutoTube AI{% endblock %}
 {% block content %}
-  <section id="approvals-section">
-    <div style="display:flex; align-items:baseline; justify-content:space-between;">
-      <h3 style="margin-bottom:0.25rem;">Awaiting your approval ({{ approvals|length }})</h3>
+  <section class="section">
+    <div class="section-head">
+      <h3>Overview</h3>
+      <span id="runs-updated" class="hint"></span>
     </div>
-    <div id="approvals-banner"></div>
-    {% if not approvals %}
-      <p class="empty-state">Nothing pending review.</p>
-    {% else %}
-    <div class="approval-grid">
-      {% for item in approvals %}
-      {% set run = item.run %}
-      {% set packet = item.packet %}
-      <div class="approval-card">
-        <div class="approval-card-head">
-          <div>
-            <strong>{{ (packet.title if packet else none) or (run.selected_topic or {}).get("title", "Untitled run") }}</strong>
-            <div class="stage-label"><code>{{ run.id|string|truncate(8, True, "") }}</code> · requested {{ run.updated_at }}</div>
-          </div>
-          <span class="badge badge-awaiting_approval"><span class="badge-dot"></span>awaiting approval</span>
-        </div>
-
-        {% if not packet %}
-          <p class="empty-state">Approval packet unavailable (checkpoint not reachable) — open full review for details.</p>
-        {% else %}
-          <p>{{ packet.description }}</p>
-          <p class="stage-label">Hook: {{ packet.script_summary }}</p>
-
-          <div class="thumbs">
-            {% for t in packet.thumbnail_options %}
-            <figure>
-              <div class="thumb-placeholder">thumbnail {{ loop.index }}</div>
-              <figcaption>#{{ loop.index0 }}</figcaption>
-            </figure>
-            {% endfor %}
-          </div>
-
-          <div class="compliance-chips">
-            <span class="badge {{ 'badge-published' if packet.compliance_result.copyright_risk_score <= 3 else 'badge-failed' }}">copyright risk {{ packet.compliance_result.copyright_risk_score }}/10</span>
-            <span class="badge {{ 'badge-published' if packet.compliance_result.av_sync_ok else 'badge-failed' }}">AV sync {{ "ok" if packet.compliance_result.av_sync_ok else "issue" }}</span>
-            <span class="badge {{ 'badge-published' if packet.compliance_result.spec_check_ok else 'badge-failed' }}">spec {{ "ok" if packet.compliance_result.spec_check_ok else "issue" }}</span>
-          </div>
-        {% endif %}
-
-        <div class="actions">
-          <form method="post" action="/dashboard/{{ run.id }}/approve">
-            <input type="hidden" name="selected_thumbnail_index" value="0">
-            <input type="text" name="reviewer" placeholder="your name" required>
-            <button class="approve" type="submit">Approve & Publish</button>
-          </form>
-          <form method="post" action="/dashboard/{{ run.id }}/reject">
-            <input type="text" name="reviewer" placeholder="your name" required>
-            <input type="text" name="notes" placeholder="reason for rejection">
-            <button class="reject" type="submit">Reject</button>
-          </form>
-          <a href="/dashboard/{{ run.id }}" class="stage-label">Full review →</a>
-        </div>
-      </div>
-      {% endfor %}
-    </div>
-    {% endif %}
+    <div class="stat-grid" id="stat-grid"></div>
   </section>
 
-  <div class="stat-grid" id="stat-grid"></div>
+  <nav class="tab-bar" id="tab-bar">
+    <button data-tab="pending" class="active">Pending approval<span class="count-pill warn" id="count-pending">0</span></button>
+    <button data-tab="progress">In progress<span class="count-pill" id="count-progress">0</span></button>
+    <button data-tab="approved">Approved<span class="count-pill" id="count-approved">0</span></button>
+    <button data-tab="published">Published<span class="count-pill" id="count-published">0</span></button>
+    <button data-tab="attention">Needs attention<span class="count-pill attn" id="count-attention">0</span></button>
+    <button data-tab="rejected">Rejected<span class="count-pill" id="count-rejected">0</span></button>
+    <button data-tab="activity">Activity</button>
+  </nav>
 
-  <h3>All runs <span id="runs-updated" class="stage-label"></span></h3>
-  <table>
-    <thead><tr><th>Run</th><th>Topic</th><th>Status</th><th>Stage</th><th>Updated</th><th></th></tr></thead>
-    <tbody id="runs-body"></tbody>
-  </table>
+  <section data-panel="pending">
+    <div class="section-head">
+      <h3>Pending approval</h3>
+      <span class="hint">watch the full video and read the script, then approve or reject</span>
+    </div>
+    <div class="approval-grid" id="approvals-grid"></div>
+    <p class="empty-state" id="approvals-empty" hidden>Nothing pending review.</p>
+  </section>
 
-  <h3>Live activity</h3>
-  <div class="log-feed" id="log-feed"></div>
+  <section data-panel="progress" hidden>
+    <div class="section-head"><h3>In progress</h3></div>
+    <div id="panel-progress"></div>
+  </section>
+
+  <section data-panel="approved" hidden>
+    <div class="section-head"><h3>Approved — awaiting upload</h3></div>
+    <div id="panel-approved"></div>
+  </section>
+
+  <section data-panel="published" hidden>
+    <div class="section-head"><h3>Published</h3></div>
+    <div id="panel-published"></div>
+  </section>
+
+  <section data-panel="attention" hidden>
+    <div class="section-head"><h3>Needs attention</h3><span class="hint">failed or escalated past the retry limit</span></div>
+    <div id="panel-attention"></div>
+  </section>
+
+  <section data-panel="rejected" hidden>
+    <div class="section-head"><h3>Rejected</h3></div>
+    <div id="panel-rejected"></div>
+  </section>
+
+  <section data-panel="activity" hidden>
+    <div class="section-head">
+      <h3>Background script activity</h3>
+      <span class="hint">standalone scripts/produce_*.py runs — bypass the pipeline, tracked separately</span>
+    </div>
+    <table>
+      <thead><tr><th>Script</th><th>Status</th><th>Step</th><th>Updated</th><th>Output</th></tr></thead>
+      <tbody id="script-runs-body"></tbody>
+    </table>
+
+    <div class="section-head" style="margin-top:1.5rem;"><h3>Live agent activity</h3></div>
+    <div class="log-feed" id="log-feed"></div>
+  </section>
 
   <script id="initial-snapshot" type="application/json">{{ snapshot | tojson }}</script>
   <script>
-    const STAT_TILES = [
-      ["running", "Running", false],
-      ["pending", "Queued", false],
-      ["awaiting_approval", "Awaiting approval", false],
-      ["published", "Published", false],
-      ["needs_attention", "Needs attention", true],
-    ];
-
+    /* ---- helpers ------------------------------------------------------------------ */
     function escapeHtml(s) {
       return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
     }
-
     function timeAgo(iso) {
       if (!iso) return "—";
       const seconds = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
@@ -99,7 +84,32 @@
       if (hours < 24) return `${hours}h ago`;
       return `${Math.floor(hours / 24)}d ago`;
     }
+    function fmtUsd(n) { return `$${(Number(n) || 0).toFixed(2)}`; }
+    function fmtDuration(totalSeconds) {
+      if (totalSeconds === null || totalSeconds === undefined) return "—";
+      const s = Math.max(0, Math.round(totalSeconds));
+      if (s < 60) return `${s}s`;
+      const m = Math.floor(s / 60);
+      if (m < 60) return `${m}m ${s % 60}s`;
+      const h = Math.floor(m / 60);
+      return `${h}h ${m % 60}m`;
+    }
+    function clock(totalSeconds) {
+      if (totalSeconds === null || totalSeconds === undefined) return "";
+      const s = Math.max(0, Math.round(totalSeconds));
+      return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+    }
+    function lsGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+    function lsSet(k, v) { try { localStorage.setItem(k, v); } catch { /* private mode */ } }
 
+    /* ---- overview tiles --------------------------------------------------------- */
+    const STAT_TILES = [
+      ["running", "Running", false],
+      ["pending", "Queued", false],
+      ["awaiting_approval", "Awaiting approval", false],
+      ["published", "Published", false],
+      ["needs_attention", "Needs attention", true],
+    ];
     function renderStats(stats) {
       const grid = document.getElementById("stat-grid");
       grid.innerHTML = STAT_TILES.map(([key, label, isAttn]) => `
@@ -107,28 +117,128 @@
           <div class="stat-value">${stats[key] ?? 0}</div>
           <div class="stat-label">${label}</div>
         </div>`).join("") + `
-        <div class="stat-tile">
-          <div class="stat-value">$${(stats.cost_today_usd ?? 0).toFixed(2)}</div>
-          <div class="stat-label">Cost today</div>
-        </div>
-        <div class="stat-tile">
-          <div class="stat-value">$${(stats.cost_total_usd ?? 0).toFixed(2)}</div>
-          <div class="stat-label">Cost total</div>
-        </div>`;
+        <div class="stat-tile"><div class="stat-value">${fmtUsd(stats.cost_today_usd)}</div><div class="stat-label">Cost today</div></div>
+        <div class="stat-tile"><div class="stat-value">${fmtUsd(stats.cost_total_usd)}</div><div class="stat-label">Cost total</div></div>`;
     }
 
-    function renderRuns(runs) {
-      const body = document.getElementById("runs-body");
-      if (!runs.length) {
-        body.innerHTML = `<tr><td colspan="6" class="empty-state">No runs yet.</td></tr>`;
-        return;
+    /* ---- approval queue: video beside the full script ------------------------- */
+    let approvalsSignature = null;
+
+    function complianceChips(c) {
+      if (!c) return "";
+      const chip = (ok, label) => `<span class="badge ${ok ? "badge-published" : "badge-failed"}">${label}</span>`;
+      return `<div class="compliance-chips">
+        ${chip(c.copyright_risk_score <= 3, `copyright risk ${c.copyright_risk_score}/10`)}
+        ${chip(c.av_sync_ok, `AV sync ${c.av_sync_ok ? "ok" : "issue"}`)}
+        ${chip(c.spec_check_ok, `spec ${c.spec_check_ok ? "ok" : "issue"}`)}
+        ${(c.community_guidelines_flags || []).map((f) => `<span class="badge badge-failed">${escapeHtml(f)}</span>`).join("")}
+        ${(c.blocking_reasons || []).map((f) => `<span class="badge badge-failed">${escapeHtml(f)}</span>`).join("")}
+      </div>`;
+    }
+
+    function scriptPane(script, summary) {
+      if (!script) {
+        return `<div class="review-script"><p class="stage-label">Full script unavailable (checkpoint not reachable).</p>
+          ${summary ? `<p>${escapeHtml(summary)}</p>` : ""}</div>`;
       }
-      body.innerHTML = runs.map((r) => {
-        const pct = r.progress_total ? Math.round((r.progress / r.progress_total) * 100) : 0;
-        const done = r.status === "published";
-        const link = r.status === "awaiting_approval" ? `<a href="/dashboard/${r.id}">Review →</a>` : "";
-        return `
-        <tr>
+      const beats = (script.beats || []).map((b) => `
+        <div class="beat">
+          <div class="beat-meta">#${b.index ?? "?"} · ${escapeHtml(b.type || "beat")}${b.timestamp_seconds != null ? ` · ${clock(b.timestamp_seconds)}` : ""}</div>
+          <p>${escapeHtml(b.voiceover_text)}</p>
+          ${b.visual_cue ? `<p class="cue">🎬 ${escapeHtml(b.visual_cue)}</p>` : ""}
+        </div>`).join("");
+      return `<div class="review-script">
+        <h4>${escapeHtml(script.working_title || "Script")}</h4>
+        ${script.hook ? `<p class="script-hook"><b>HOOK</b> — ${escapeHtml(script.hook)}</p>` : ""}
+        ${beats || (script.full_text ? `<pre class="script-fulltext">${escapeHtml(script.full_text)}</pre>` : "")}
+        ${script.cta ? `<p class="script-cta"><b>CTA</b> — ${escapeHtml(script.cta)}</p>` : ""}
+      </div>`;
+    }
+
+    function thumbPicker(thumbs) {
+      if (!thumbs || !thumbs.length) return `<p class="stage-label">No thumbnail candidates.</p>`;
+      return `<div class="thumbs">` + thumbs.map((t, i) => `
+        <label class="thumb-pick">
+          <input type="radio" name="selected_thumbnail_index" value="${t.index}" ${i === 0 ? "checked" : ""}>
+          ${t.url
+            ? `<img class="thumb-img" src="${escapeHtml(t.url)}" alt="thumbnail ${t.index}" loading="lazy"
+                 onerror="this.outerHTML='<span class=&quot;thumb-placeholder&quot;>image missing</span>'">`
+            : `<span class="thumb-placeholder">not generated</span>`}
+          <span class="pick-tag">use #${t.index}</span>
+        </label>`).join("") + `</div>`;
+    }
+
+    function approvalCard(a) {
+      const head = `
+        <div class="approval-card-head">
+          <div>
+            <h4>${escapeHtml(a.title)}</h4>
+            <div class="stage-label"><code>${a.short_id}</code> · requested ${timeAgo(a.requested_at)}</div>
+          </div>
+          <span class="badge badge-awaiting_approval"><span class="badge-dot"></span>awaiting approval</span>
+        </div>`;
+
+      if (!a.has_packet) {
+        return `<div class="approval-card">${head}
+          <p class="empty-state">Approval packet unavailable (checkpoint not reachable).</p>
+          <div class="actions"><a href="/dashboard/${a.id}">Open full review →</a></div>
+        </div>`;
+      }
+
+      const video = a.render_url
+        ? `<video class="video-preview" controls preload="metadata" src="${escapeHtml(a.render_url)}" style="width:100%"></video>`
+        : `<p class="stage-label">Rendered video not available yet.</p>`;
+
+      return `<div class="approval-card">${head}
+        ${a.description ? `<p class="desc">${escapeHtml(a.description)}</p>` : ""}
+        <div class="review-split">
+          <div class="review-video">${video}</div>
+          ${scriptPane(a.script, a.script_summary)}
+        </div>
+        ${complianceChips(a.compliance)}
+        <div class="actions">
+          <form method="post" action="/dashboard/${a.id}/approve">
+            ${thumbPicker(a.thumbnails)}
+            <input type="text" name="reviewer" placeholder="your name" required>
+            <button class="approve" type="submit">Approve &amp; Publish</button>
+          </form>
+          <form method="post" action="/dashboard/${a.id}/reject">
+            <input type="text" name="reviewer" placeholder="your name" required>
+            <input type="text" name="notes" placeholder="reason for rejection">
+            <button class="reject" type="submit">Reject</button>
+          </form>
+        </div>
+        <div class="actions"><a href="/dashboard/${a.id}" class="stage-label">Full review page →</a></div>
+      </div>`;
+    }
+
+    function renderApprovals(approvals) {
+      approvals = approvals || [];
+      document.getElementById("approvals-empty").hidden = approvals.length > 0;
+
+      const signature = approvals.map((a) => `${a.id}:${a.has_packet}:${a.thumbnails.length}:${!!a.render_url}:${!!a.script}`).join("|");
+      if (signature === approvalsSignature) return;  // same queue — leave cards (and typed input) alone
+      approvalsSignature = signature;
+      document.getElementById("approvals-grid").innerHTML = approvals.map(approvalCard).join("");
+    }
+
+    /* ---- run tabs -------------------------------------------------------------- */
+    const RUN_TABS = [
+      { id: "progress",  match: (s) => s === "pending" || s === "running" },
+      { id: "approved",  match: (s) => s === "approved" },
+      { id: "published", match: (s) => s === "published" },
+      { id: "attention", match: (s) => s === "failed" || s === "escalated" },
+      { id: "rejected",  match: (s) => s === "rejected" },
+    ];
+
+    function runRow(r) {
+      const pct = r.progress_total ? Math.round((r.progress / r.progress_total) * 100) : 0;
+      const done = r.status === "published";
+      const video = r.youtube_url
+        ? `<a class="yt-chip" href="${escapeHtml(r.youtube_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">▶ watch</a>`
+        : (r.render_url ? `<a class="media-chip" href="${escapeHtml(r.render_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">▶ preview</a>` : "");
+      return `
+        <tr class="clickable" onclick="location.href='/dashboard/${r.id}'">
           <td><code title="${r.id}">${r.short_id}</code></td>
           <td>${escapeHtml(r.topic)}</td>
           <td><span class="badge badge-${r.status}"><span class="badge-dot"></span>${r.status}</span></td>
@@ -136,8 +246,63 @@
             <div class="stage-label">${escapeHtml(r.stage_label)}${r.progress_total ? ` (${r.progress}/${r.progress_total})` : ""}</div>
             <div class="progress-track"><div class="progress-fill${done ? " done" : ""}" style="width:${pct}%"></div></div>
           </td>
-          <td>${timeAgo(r.updated_at)}</td>
-          <td>${link}</td>
+          <td class="num">${fmtUsd(r.cost_usd)}</td>
+          <td class="num">${fmtDuration(r.duration_seconds)}</td>
+          <td class="num">${timeAgo(r.updated_at)}</td>
+          <td>${video}</td>
+        </tr>`;
+    }
+
+    function runTable(rows, emptyMsg) {
+      if (!rows.length) return `<p class="empty-state">${emptyMsg}</p>`;
+      return `<table>
+        <thead><tr><th>Run</th><th>Topic</th><th>Status</th><th>Stage</th><th>Cost</th><th>Elapsed</th><th>Updated</th><th>Video</th></tr></thead>
+        <tbody>${rows.map(runRow).join("")}</tbody>
+      </table>`;
+    }
+
+    function renderRuns(runs) {
+      runs = runs || [];
+      const buckets = { progress: [], approved: [], published: [], attention: [], rejected: [] };
+      for (const r of runs) {
+        const tab = RUN_TABS.find((t) => t.match(r.status));
+        if (tab) buckets[tab.id].push(r);
+      }
+      document.getElementById("panel-progress").innerHTML = runTable(buckets.progress, "No runs in progress.");
+      document.getElementById("panel-approved").innerHTML = runTable(buckets.approved, "Nothing approved and waiting to upload.");
+      document.getElementById("panel-published").innerHTML = runTable(buckets.published, "Nothing published yet.");
+      document.getElementById("panel-attention").innerHTML = runTable(buckets.attention, "Nothing needs attention. 🎉");
+      document.getElementById("panel-rejected").innerHTML = runTable(buckets.rejected, "No rejected runs.");
+      for (const id of Object.keys(buckets)) {
+        document.getElementById("count-" + id).textContent = buckets[id].length;
+      }
+    }
+
+    /* ---- activity tab -------------------------------------------------------------- */
+    const SCRIPT_STATUS_BADGE = { running: "badge-running", done: "badge-published", failed: "badge-failed" };
+    function renderScriptRuns(scriptRuns) {
+      const body = document.getElementById("script-runs-body");
+      if (!scriptRuns || !scriptRuns.length) {
+        body.innerHTML = `<tr><td colspan="5" class="empty-state">No standalone script runs yet (or none in the last 6h — entries expire after that).</td></tr>`;
+        return;
+      }
+      body.innerHTML = scriptRuns.map((s) => {
+        const pct = s.total_steps ? Math.round((s.step_index / s.total_steps) * 100) : 0;
+        const badgeClass = SCRIPT_STATUS_BADGE[s.status] || "badge-pending";
+        const outputLink = s.status === "done" && s.output_path
+          ? (s.output_path.startsWith("http") ? `<a href="${escapeHtml(s.output_path)}" target="_blank" rel="noopener">open →</a>` : `<code title="${escapeHtml(s.output_path)}">file ready</code>`)
+          : "";
+        return `
+        <tr>
+          <td><code>${escapeHtml(s.name)}</code></td>
+          <td><span class="badge ${badgeClass}"><span class="badge-dot"></span>${escapeHtml(s.status)}</span></td>
+          <td>
+            <div class="stage-label">${escapeHtml(s.step_label)}${s.total_steps ? ` (${s.step_index}/${s.total_steps})` : ""}</div>
+            <div class="progress-track"><div class="progress-fill${s.status === "done" ? " done" : ""}" style="width:${pct}%"></div></div>
+            ${s.error ? `<div class="stage-label" style="color:var(--critical)">${escapeHtml(s.error.split("\\n").slice(-1)[0])}</div>` : ""}
+          </td>
+          <td class="num">${timeAgo(s.updated_at)}</td>
+          <td>${outputLink}</td>
         </tr>`;
       }).join("");
     }
@@ -162,26 +327,38 @@
       }).join("");
     }
 
-    function renderApprovalsBanner(awaitingCount) {
-      const banner = document.getElementById("approvals-banner");
-      if (awaitingCount > renderedApprovalCount) {
-        banner.innerHTML = `<p class="approval-alert">New run${awaitingCount - renderedApprovalCount > 1 ? "s" : ""} awaiting approval — <a href="javascript:location.reload()">refresh to review</a>.</p>`;
-      } else if (awaitingCount === 0) {
-        banner.innerHTML = "";
+    /* ---- tab switching ------------------------------------------------------------ */
+    function initTabs() {
+      const bar = document.getElementById("tab-bar");
+      const panels = document.querySelectorAll("[data-panel]");
+      const known = new Set([...bar.querySelectorAll("button")].map((b) => b.dataset.tab));
+
+      function activate(id) {
+        if (!known.has(id)) id = "pending";
+        panels.forEach((p) => { p.hidden = p.dataset.panel !== id; });
+        bar.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.tab === id));
+        lsSet("dash-tab", id);
       }
+      bar.addEventListener("click", (e) => {
+        const b = e.target.closest("button");
+        if (b) activate(b.dataset.tab);
+      });
+      activate(lsGet("dash-tab") || "pending");
     }
 
+    /* ---- wire-up ---------------------------------------------------------------- */
     function applySnapshot(snapshot) {
       renderStats(snapshot.stats);
+      renderApprovals(snapshot.approvals);
       renderRuns(snapshot.runs);
+      renderScriptRuns(snapshot.script_runs);
       renderLogs(snapshot.logs);
-      renderApprovalsBanner(snapshot.stats.awaiting_approval);
+      document.getElementById("count-pending").textContent = (snapshot.approvals || []).length;
       document.getElementById("runs-updated").textContent = "updated " + timeAgo(snapshot.generated_at);
     }
 
-    const initial = JSON.parse(document.getElementById("initial-snapshot").textContent);
-    const renderedApprovalCount = initial.stats.awaiting_approval;
-    applySnapshot(initial);
+    initTabs();
+    applySnapshot(JSON.parse(document.getElementById("initial-snapshot").textContent));
 
     const liveDot = document.getElementById("live-dot");
     const liveText = document.getElementById("live-text");

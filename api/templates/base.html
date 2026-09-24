@@ -5,23 +5,47 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}AutoTube AI{% endblock %}</title>
   <style>
+    /* ---- tokens ------------------------------------------------------------ */
     :root {
       color-scheme: light dark;
       --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
-      --running: #2a78d6; --muted: #898781; --border: rgba(11,11,11,0.10);
+      --running: #2a78d6; --muted: #898781; --border: rgba(11,11,11,0.12);
+      --surface: rgba(128,128,128,0.06); --surface-hover: rgba(128,128,128,0.12);
+      --radius: 8px;
     }
-    @media (prefers-color-scheme: dark) { :root { --border: rgba(255,255,255,0.10); } }
+    @media (prefers-color-scheme: dark) {
+      :root { --border: rgba(255,255,255,0.14); --surface: rgba(255,255,255,0.04); --surface-hover: rgba(255,255,255,0.09); }
+    }
+
+    /* ---- layout ---------------------------------------------------------------- */
+    * { box-sizing: border-box; }
     body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
-    header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 1.5rem; }
+    header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
     header a { text-decoration: none; color: inherit; }
+    header h2 { margin: 0; }
+    .header-right { display: flex; align-items: center; gap: 1.25rem; }
+
+    .section { margin: 2rem 0; }
+    .section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.6rem; }
+    .section-head h3 { margin: 0; }
+    .section-head .hint { font-size: 0.78rem; color: var(--muted); font-weight: 400; }
+
+    /* ---- live indicator --------------------------------------------------------- */
     .live-indicator { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; color: var(--muted); }
     .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
     .live-dot.on { background: var(--good); animation: pulse 1.6s ease-in-out infinite; }
     .live-dot.off { background: var(--critical); }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
-    table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
-    th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #8884; }
-    tbody tr:hover { background: #8881; }
+
+    /* ---- tables --------------------------------------------------------------- */
+    table { width: 100%; border-collapse: collapse; margin: 0.5rem 0; }
+    th, td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); font-weight: 600; }
+    tbody tr:hover { background: var(--surface-hover); }
+    tr.clickable { cursor: pointer; }
+    td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+    /* ---- badges -------------------------------------------------------------- */
     .badge { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.8rem; font-weight: 600; white-space: nowrap; background: color-mix(in srgb, var(--muted) 15%, transparent); }
     .badge-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--muted); }
     .badge-awaiting_approval { background: color-mix(in srgb, var(--warning) 20%, transparent); }
@@ -36,32 +60,90 @@
     .badge-running .badge-dot { background: var(--running); animation: pulse 1.6s ease-in-out infinite; }
     .badge-pending { background: color-mix(in srgb, var(--muted) 15%, transparent); }
     .badge-pending .badge-dot { background: var(--muted); }
-    .card { border: 1px solid #8884; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
-    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 0.75rem; margin: 1rem 0 1.5rem; }
-    .stat-tile { border: 1px solid #8884; border-radius: 8px; padding: 0.75rem 1rem; }
+
+    /* ---- cards & stat tiles ------------------------------------------------------ */
+    .card { border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; margin: 1rem 0; background: var(--surface); }
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 0.75rem; margin: 1rem 0; }
+    .stat-tile { border: 1px solid var(--border); border-radius: var(--radius); padding: 0.75rem 1rem; background: var(--surface); }
     .stat-tile .stat-value { font-size: 1.6rem; font-weight: 700; font-variant-numeric: proportional-nums; }
     .stat-tile .stat-label { font-size: 0.78rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
     .stat-tile.attn .stat-value { color: var(--critical); }
-    .progress-track { width: 100%; height: 4px; border-radius: 999px; background: #8883; overflow: hidden; margin-top: 0.3rem; }
+
+    /* ---- progress bar ------------------------------------------------------------ */
+    .progress-track { width: 100%; height: 4px; border-radius: 999px; background: color-mix(in srgb, var(--muted) 25%, transparent); overflow: hidden; margin-top: 0.3rem; }
     .progress-fill { height: 100%; background: var(--running); border-radius: 999px; transition: width 0.6s ease; }
     .progress-fill.done { background: var(--good); }
     .stage-label { font-size: 0.78rem; color: var(--muted); }
+
+    /* ---- thumbnails ------------------------------------------------------------- */
     .thumbs { display: flex; gap: 1rem; flex-wrap: wrap; margin: 0.5rem 0; }
     .thumbs figure { margin: 0; text-align: center; font-size: 0.85rem; }
-    .thumb-placeholder { width: 160px; height: 90px; background: #8882; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 0.75rem; color: var(--muted); }
-    .approval-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 1rem; margin: 0.75rem 0 1.5rem; }
+    .thumb-img, .thumb-placeholder { width: 192px; height: 108px; border-radius: 6px; display: block; object-fit: cover; background: color-mix(in srgb, var(--muted) 18%, transparent); }
+    .thumb-placeholder { display: flex; align-items: center; justify-content: center; font-size: 0.75rem; color: var(--muted); }
+
+    /* selectable thumbnail: a radio wrapped in a label, the img is the visible control */
+    .thumb-pick { position: relative; cursor: pointer; display: inline-block; }
+    .thumb-pick input { position: absolute; opacity: 0; pointer-events: none; }
+    .thumb-pick .thumb-img, .thumb-pick .thumb-placeholder { outline: 3px solid transparent; outline-offset: 2px; transition: outline-color 0.15s ease; }
+    .thumb-pick input:checked ~ .thumb-img, .thumb-pick input:checked ~ .thumb-placeholder { outline-color: var(--running); }
+    .thumb-pick input:focus-visible ~ .thumb-img, .thumb-pick input:focus-visible ~ .thumb-placeholder { outline-color: var(--warning); }
+    .thumb-pick .pick-tag { display: block; margin-top: 0.25rem; font-size: 0.78rem; color: var(--muted); }
+    .thumb-pick input:checked ~ .pick-tag { color: var(--running); font-weight: 600; }
+
+    /* ---- tabs ------------------------------------------------------------------ */
+    .tab-bar { display: flex; flex-wrap: wrap; gap: 0.25rem; border-bottom: 1px solid var(--border); margin: 1.5rem 0 1rem; }
+    .tab-bar button { background: transparent; border: none; border-bottom: 2px solid transparent; padding: 0.5rem 0.9rem; font: inherit; font-weight: 600; color: var(--muted); cursor: pointer; border-radius: 6px 6px 0 0; }
+    .tab-bar button:hover { background: var(--surface-hover); }
+    .tab-bar button.active { color: inherit; border-bottom-color: var(--running); }
+    .count-pill { display: inline-block; min-width: 1.4em; padding: 0 0.35em; margin-left: 0.35em; border-radius: 999px; font-size: 0.75em; font-weight: 700; text-align: center; background: color-mix(in srgb, var(--muted) 22%, transparent); }
+    .count-pill.warn { background: color-mix(in srgb, var(--warning) 30%, transparent); }
+    .count-pill.attn { background: color-mix(in srgb, var(--critical) 28%, transparent); }
+    [data-panel][hidden] { display: none; }
+
+    /* ---- review split: video beside the full script -------------------------- */
+    .review-split { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 1rem; margin: 0.75rem 0; }
+    @media (max-width: 860px) { .review-split { grid-template-columns: 1fr; } }
+    .review-video video, .review-video .video-preview { width: 100%; max-width: 100%; border-radius: var(--radius); background: #000; }
+    .review-script { border: 1px solid var(--border); border-radius: var(--radius); padding: 0.75rem 0.9rem; max-height: 70vh; overflow-y: auto; background: var(--surface); font-size: 0.9rem; }
+    .review-script h4 { margin: 0 0 0.5rem; }
+    .script-hook, .script-cta { margin: 0.5rem 0; }
+    .script-hook b, .script-cta b { color: var(--running); }
+    .beat { padding: 0.5rem 0; border-top: 1px solid var(--border); }
+    .beat-meta { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 0.2rem; }
+    .beat p { margin: 0.15rem 0; }
+    .beat .cue { color: var(--muted); font-style: italic; font-size: 0.85rem; }
+    .script-fulltext { white-space: pre-wrap; margin: 0; font: inherit; }
+
+    /* ---- approval queue -------------------------------------------------------- */
+    .approval-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 1rem; margin: 0.75rem 0; }
     .approval-card { border: 2px solid color-mix(in srgb, var(--warning) 45%, transparent); border-radius: 10px; padding: 1rem; background: color-mix(in srgb, var(--warning) 6%, transparent); }
     .approval-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.75rem; margin-bottom: 0.5rem; }
-    .compliance-chips { display: flex; gap: 0.4rem; flex-wrap: wrap; margin: 0.5rem 0; }
-    .approval-alert { background: color-mix(in srgb, var(--running) 15%, transparent); border: 1px solid color-mix(in srgb, var(--running) 40%, transparent); border-radius: 8px; padding: 0.6rem 0.9rem; margin: 0.5rem 0; font-size: 0.9rem; }
-    .actions form { display: inline-block; margin-right: 0.5rem; }
+    .approval-card h4 { margin: 0 0 0.15rem; }
+    .approval-card .desc { font-size: 0.9rem; margin: 0.4rem 0; }
+    .compliance-chips { display: flex; gap: 0.4rem; flex-wrap: wrap; margin: 0.6rem 0; }
+    .approval-alert { background: color-mix(in srgb, var(--running) 15%, transparent); border: 1px solid color-mix(in srgb, var(--running) 40%, transparent); border-radius: var(--radius); padding: 0.6rem 0.9rem; margin: 0.5rem 0; font-size: 0.9rem; }
+
+    /* ---- forms & buttons ----------------------------------------------------- */
+    .actions { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: flex-start; margin-top: 0.75rem; }
+    .actions form { display: flex; flex-direction: column; gap: 0.4rem; min-width: 180px; }
     button { padding: 0.5rem 1.25rem; border-radius: 6px; border: none; cursor: pointer; font-weight: 600; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
     .approve { background: #2ecc71; color: #fff; }
     .reject { background: #e74c3c; color: #fff; }
-    textarea, input[type=text] { width: 100%; padding: 0.4rem; box-sizing: border-box; }
-    code { background: #8882; padding: 0.1rem 0.35rem; border-radius: 4px; }
-    .log-feed { max-height: 360px; overflow-y: auto; border: 1px solid #8884; border-radius: 8px; }
-    .log-row { display: grid; grid-template-columns: 5.5rem 1fr auto; gap: 0.75rem; align-items: baseline; padding: 0.4rem 0.75rem; border-bottom: 1px solid #8882; font-size: 0.85rem; }
+    textarea, input[type=text] { width: 100%; padding: 0.4rem; border-radius: 4px; border: 1px solid var(--border); background: transparent; color: inherit; font: inherit; }
+
+    /* ---- misc -------------------------------------------------------------------- */
+    code { background: color-mix(in srgb, var(--muted) 18%, transparent); padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.9em; }
+    a { color: var(--running); }
+    .yt-chip, .media-chip { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.78rem; font-weight: 600; text-decoration: none; white-space: nowrap; }
+    .yt-chip { background: color-mix(in srgb, var(--critical) 18%, transparent); color: var(--critical); }
+    .media-chip { background: color-mix(in srgb, var(--running) 18%, transparent); color: var(--running); }
+    .video-preview { width: 100%; max-width: 480px; border-radius: var(--radius); background: #000; margin: 0.5rem 0; }
+    .kv { display: grid; grid-template-columns: max-content 1fr; gap: 0.35rem 1rem; margin: 0.5rem 0; font-size: 0.92rem; }
+    .kv dt { color: var(--muted); }
+    .kv dd { margin: 0; }
+    .log-feed { max-height: 360px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+    .log-row { display: grid; grid-template-columns: 5.5rem 1fr auto; gap: 0.75rem; align-items: baseline; padding: 0.4rem 0.75rem; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
     .log-row:last-child { border-bottom: none; }
     .log-time { color: var(--muted); font-variant-numeric: tabular-nums; }
     .log-icon { font-weight: 700; }
@@ -73,7 +155,7 @@
 <body>
   <header>
     <a href="/dashboard/"><h2>AutoTube AI — Live Dashboard</h2></a>
-    <div style="display:flex; align-items:center; gap:1.25rem;">
+    <div class="header-right">
       <span class="live-indicator"><span class="live-dot" id="live-dot"></span><span id="live-text">connecting…</span></span>
       <a href="/docs">API docs</a>
     </div>

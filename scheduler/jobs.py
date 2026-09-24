@@ -32,6 +32,22 @@ def trigger_new_pipeline_run() -> None:
         db.close()
 
 
+def renew_youtube_websub_subscription() -> None:
+    """Re-subscribes to the channel's PubSubHubbub feed before the hub's lease expires (leases run
+    <=10 days; we renew daily). No-op unless the callback URL + channel id are configured."""
+    from core.settings import get_settings
+    from tools import websub
+
+    settings = get_settings()
+    if not (settings.youtube_channel_id and settings.youtube_websub_callback_url):
+        return
+    try:
+        websub.subscribe()
+        logger.info("scheduler.websub_renewed")
+    except Exception as exc:
+        logger.error("scheduler.websub_renew_failed", error=str(exc))
+
+
 def check_performance_windows() -> None:
     """Runs hourly. Finds published videos that just crossed the 24h/7d mark and haven't had
     that window captured yet, and enqueues the performance-feedback graph for each."""
