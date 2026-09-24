@@ -9,6 +9,11 @@ mascot pose pack composited over a flat backdrop with real per-frame motion (bou
 blink, an opening wave) via `_character_clip_for_beat`/`_character_frame_factory` -- this is what
 replaced panning a single AI-generated still.
 
+AI_VIDEO beats (a real Veo generation, see tools/veo_video.py and graph/nodes/visual.py's
+_try_ai_video -- gated off by default, at most settings.max_ai_video_beats_per_run per script when
+on) share STOCK_VIDEO's loop/trim/cover-crop treatment in `_clip_for_beat`: a generated clip's
+native length rarely matches the beat's voiceover-driven duration exactly.
+
 STOCK_IMAGE beats (the rare case where a stock-footage search only turns up photos, not video)
 still get a Ken Burns pan/zoom rather than a static hold: a time-varying resize composed directly
 with vfx.Crop doesn't track a growing frame's center correctly (Crop only takes a static
@@ -101,6 +106,7 @@ def _resize_to_cover(clip, width: int = TARGET_W, height: int = TARGET_H):
 
 KEN_BURNS_RATE_PER_SECOND = 0.035  # ~3.5%/s scale change -- a 6s beat zooms ~20%, gentle not jarring
 KEN_BURNS_MAX_ZOOM = 1.3
+BEAT_FADE_SECONDS = 0.35  # fade-to-black duration between beats, see video_assembly_node
 
 
 def _ken_burns_image_clip(path: str, duration: float, zoom_in: bool, width: int = TARGET_W, height: int = TARGET_H):
@@ -139,10 +145,24 @@ _WAVE_DURATION = 1.0  # mascot waves hello for the first second of each beat
 _SPRITE_HEIGHT_FRACTION = 0.6
 
 
-def _character_frame_factory(pack: dict[str, str], width: int, height: int, backdrop_rgb: tuple[int, int, int]):
+def _character_frame_factory(
+    pack: dict[str, str],
+    width: int,
+    height: int,
+    backdrop_rgb: tuple[int, int, int],
+    backdrop_image_path: str | None,
+    duration: float,
+    zoom_in: bool,
+):
     """Builds a moviepy make_frame(t) closure: a small state machine picks a pose per t (idle /
-    talk / blink / wave), composited with a vertical bounce onto a flat-color backdrop. This is
-    genuine per-frame motion, not a moving crop of a single image."""
+    talk / blink / wave), composited with a vertical bounce over a backdrop. This is genuine
+    per-frame motion, not a moving crop of a single image.
+
+    The backdrop is a Ken-Burns-panned photo (asset_visual_node's per-beat Pollinations image,
+    see graph/nodes/visual.py's _try_character_animation) when one was generated, falling back to
+    the flat palette color otherwise -- same zoom math as _ken_burns_image_clip, just resampled
+    manually per frame here since the backdrop is composited with the sprite before becoming a
+    clip, not built as a moviepy clip of its own."""
     poses = {}
     sprite_h = int(height * _SPRITE_HEIGHT_FRACTION)
     for name, path in pack.items():
@@ -150,9 +170,29 @@ def _character_frame_factory(pack: dict[str, str], width: int, height: int, back
         scale = sprite_h / img.height
         poses[name] = img.resize((max(1, int(img.width * scale)), sprite_h))
 
-    backdrop = Image.new("RGBA", (width, height), (*backdrop_rgb, 255))
+    photo = None
+    if backdrop_image_path and os.path.exists(backdrop_image_path):
+        try:
+            photo = Image.open(backdrop_image_path).convert("RGB")
+        except Exception:
+            photo = None
+
+    flat_backdrop = Image.new("RGBA", (width, height), (*backdrop_rgb, 255))
+    if photo is not None:
+        cover_scale = max(width / photo.width, height / photo.height)
+        zoom_span = min(KEN_BURNS_MAX_ZOOM - 1.0, KEN_BURNS_RATE_PER_SECOND * duration)
+        start_zoom, end_zoom = (1.0, 1.0 + zoom_span) if zoom_in else (1.0 + zoom_span, 1.0)
 
     def make_frame(t: float) -> np.ndarray:
+        if photo is not None:
+            progress = (t / duration) if duration > 0 else 0.0
+            scale = cover_scale * (start_zoom + (end_zoom - start_zoom) * progress)
+            resized = photo.resize((max(1, int(photo.width * scale)), max(1, int(photo.height * scale))))
+            left, top = (resized.width - width) // 2, (resized.height - height) // 2
+            frame = resized.crop((left, top, left + width, top + height)).convert("RGBA")
+        else:
+            frame = flat_backdrop.copy()
+
         if t < _WAVE_DURATION:
             pose = "wave"
         elif (t % _BLINK_EVERY) < _BLINK_DURATION:
@@ -165,17 +205,20 @@ def _character_frame_factory(pack: dict[str, str], width: int, height: int, back
         x = (width - sprite.width) // 2
         y = height - sprite.height - int(height * 0.05) - bounce
 
-        frame = backdrop.copy()
         frame.alpha_composite(sprite, (x, y))
         return np.array(frame.convert("RGB"))
 
     return make_frame
 
 
-def _character_clip_for_beat(beat_index: int, duration: float, width: int = TARGET_W, height: int = TARGET_H):
+def _character_clip_for_beat(
+    beat_index: int, duration: float, backdrop_image_path: str | None = None, width: int = TARGET_W, height: int = TARGET_H
+):
     pack = character_assets_tool.get_character_pack()
     backdrop_rgb = _BACKDROP_PALETTE[beat_index % len(_BACKDROP_PALETTE)]
-    make_frame = _character_frame_factory(pack, width, height, backdrop_rgb)
+    make_frame = _character_frame_factory(
+        pack, width, height, backdrop_rgb, backdrop_image_path, duration, zoom_in=beat_index % 2 == 0
+    )
     return VideoClip(make_frame, duration=duration)
 
 
@@ -183,12 +226,12 @@ def _clip_for_beat(asset: SourcedAsset | None, duration: float):
     """Returns (clip, raw_video_handle_or_None) — the raw handle is tracked separately for
     cleanup since resize/crop wrap it in a derived clip that no longer exposes .close()."""
     if asset is not None and asset.asset_type == AssetType.CHARACTER_ANIMATION:
-        return _character_clip_for_beat(asset.beat_index, duration), None
+        return _character_clip_for_beat(asset.beat_index, duration, backdrop_image_path=asset.local_path), None
 
     if asset is None or not asset.local_path or not os.path.exists(asset.local_path):
         return ColorClip(size=(TARGET_W, TARGET_H), color=(20, 20, 20)).with_duration(duration), None
 
-    if asset.asset_type == AssetType.STOCK_VIDEO:
+    if asset.asset_type in (AssetType.STOCK_VIDEO, AssetType.AI_VIDEO):
         raw = VideoFileClip(asset.local_path)
         source = raw.subclipped(0, duration) if raw.duration >= duration else raw.with_effects([vfx.Loop(duration=duration)])
         return _resize_to_cover(source).with_duration(duration), raw
@@ -216,6 +259,22 @@ def video_assembly_node(state: PipelineState) -> dict:
         beat_clips.append(clip)
         if raw_handle is not None:
             video_handles.append(raw_handle)
+
+    # Fade-to-black transitions between beats instead of hard cuts. Deliberately in/out fades
+    # (each confined to its own clip's existing duration) rather than a true crossfade: a
+    # crossfade needs two clips overlapping in time, which would shrink the concatenated video's
+    # total duration below voiceover.total_duration_seconds and trip publish_node's AV-sync drift
+    # check (2s tolerance, easily blown across a dozen-plus beats). Fades touch pixels only, never
+    # timing, so duration stays exactly the sum of per-beat durations.
+    for i, clip in enumerate(beat_clips):
+        half = clip.duration / 2
+        effects = []
+        if i > 0:
+            effects.append(vfx.FadeIn(min(BEAT_FADE_SECONDS, half)))
+        if i < len(beat_clips) - 1:
+            effects.append(vfx.FadeOut(min(BEAT_FADE_SECONDS, half)))
+        if effects:
+            beat_clips[i] = clip.with_effects(effects)
 
     video_no_audio = concatenate_videoclips(beat_clips, method="compose")
     full_audio = AudioFileClip(voiceover.full_audio_path)

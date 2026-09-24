@@ -26,7 +26,9 @@ dependencies = [
     # DB
     "sqlalchemy>=2.0.0",
     "alembic>=1.13.0",
-    "psycopg[binary]>=3.2.0",
+    "psycopg[binary]>=3.2.3",  # >=3.2.0 lets pip's resolver backtrack onto psycopg 3.2.0 itself,
+    # whose [binary] extra has broken metadata (pins psycopg-binary==3.2.0.dev1, unresolvable) --
+    # 3.2.3 is the first release after that got fixed
     "pgvector>=0.3.0",
     "python-dotenv>=1.0.0",
     # Validation / config
@@ -39,9 +41,13 @@ dependencies = [
     "google-api-python-client>=2.140.0",
     "google-auth-oauthlib>=1.2.0",
     "google-auth-httplib2>=0.2.0",
+    "google-genai>=1.0.0",
     "pytrends>=4.9.2",
     "youtube-transcript-api>=0.6.2",
     "tavily-python>=0.5.0",
+    "huggingface-hub>=0.27.0",  # AI_VIDEO beats via Inference Providers, see tools/hf_video.py
+    "fal-client>=1.0.0",  # AI_VIDEO beats via direct fal.ai API, see tools/fal_video.py
+    "gradio-client>=1.0.0",  # talks to the Colab-hosted video-gen endpoint, see tools/colab_video.py
     # Media
     "moviepy>=1.0.3",
     "pillow>=10.4.0",

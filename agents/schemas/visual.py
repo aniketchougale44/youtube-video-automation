@@ -11,6 +11,7 @@ from agents.schemas.script import ScriptOutput
 class SceneType(StrEnum):
     BROLL = "broll"
     AI_IMAGE = "ai_image"
+    AI_VIDEO = "ai_video"
     CHART = "chart"
     MOTION_GRAPHIC = "motion_graphic"
 
@@ -37,6 +38,7 @@ class AssetType(StrEnum):
     STOCK_VIDEO = "stock_video"
     STOCK_IMAGE = "stock_image"
     AI_IMAGE = "ai_image"
+    AI_VIDEO = "ai_video"
     CHARACTER_ANIMATION = "character_animation"
 
 
