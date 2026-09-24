@@ -17,6 +17,9 @@ class PipelineState(TypedDict, total=False):
 
     # --- injected by the caller (worker/tasks.py) before start_run(), from Postgres ---
     past_performance_summary: str | None
+    # numeric signal from the last feedback run (LearningUpdate.strategy_weight_adjustments),
+    # e.g. {"evergreen_bias": 0.05}; strategy_node folds it into its prompt
+    strategy_weight_adjustments: dict[str, float] | None
 
     # --- stage outputs (dicts matching agents.schemas.*) ---
     trend_output: dict | None
@@ -54,11 +57,13 @@ def initial_state(
     max_retries: int = 3,
     debug_force_reject: dict | None = None,
     past_performance_summary: str | None = None,
+    strategy_weight_adjustments: dict[str, float] | None = None,
 ) -> PipelineState:
     return PipelineState(
         run_id=run_id,
         thread_id=thread_id,
         past_performance_summary=past_performance_summary,
+        strategy_weight_adjustments=strategy_weight_adjustments or {},
         retry_counts={},
         max_retries=max_retries,
         escalated=False,

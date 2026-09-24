@@ -206,10 +206,23 @@ class _StrategyChoice(BaseModel):
 
 _STRATEGY_SYSTEM_PROMPT = (
     "You are a YouTube channel strategist. Given ranked topic candidates, the channel's goals, "
-    "and a summary of past video performance, choose exactly one topic to produce next and decide "
-    "its format. Weigh the candidates' scores, but you may override the top-ranked one if channel "
-    "goals or past performance clearly favor another."
+    "a summary of past video performance, and a set of learned strategy-weight adjustments, choose "
+    "exactly one topic to produce next and decide its format. Weigh the candidates' scores, but "
+    "you may override the top-ranked one if channel goals or past performance clearly favor "
+    "another. The strategy-weight adjustments are numeric nudges the feedback loop derived from "
+    "how recent videos actually performed, each in [-0.2, 0.2]: `evergreen_bias` > 0 means recent "
+    "evergreen/perennial topics out-performed their baseline so lean toward timeless subjects; "
+    "< 0 means trend-driven, timely topics did better so favor those. Treat a larger magnitude as "
+    "a stronger pull; near-zero or absent means no learned preference — decide on the other inputs."
 )
+
+
+def _format_weight_adjustments(adjustments: dict[str, float]) -> str:
+    if not adjustments:
+        return "No learned strategy-weight adjustments yet (feedback loop has no clear signal)."
+    return "Learned strategy-weight adjustments (from recent performance):\n" + "\n".join(
+        f"- {key} = {value:+.3f}" for key, value in sorted(adjustments.items())
+    )
 
 
 def strategy_node(state: PipelineState) -> dict:
@@ -218,6 +231,7 @@ def strategy_node(state: PipelineState) -> dict:
 
     trend_output = TrendResearchOutput.model_validate(state["trend_output"])
     past_performance_summary = state.get("past_performance_summary") or "No prior performance data available yet."
+    weight_adjustments = state.get("strategy_weight_adjustments") or {}
 
     candidates_listing = "\n".join(
         f"- \"{c.title}\" (search_volume={c.search_volume_score}, competition={c.competition_score}, "
@@ -227,6 +241,7 @@ def strategy_node(state: PipelineState) -> dict:
     prompt = (
         f"Channel goals: {settings.channel_goals}\n\n"
         f"Past performance summary: {past_performance_summary}\n\n"
+        f"{_format_weight_adjustments(weight_adjustments)}\n\n"
         f"Candidate topics (ranked by composite score, highest first):\n{candidates_listing}"
     )
     choice = call_structured(prompt, _StrategyChoice, system=_STRATEGY_SYSTEM_PROMPT)
@@ -248,6 +263,9 @@ def strategy_node(state: PipelineState) -> dict:
         "strategy_decision": decision.model_dump(mode="json"),
         "trace": [
             trace,
-            log_and_trace(STAGE_STRATEGY, "complete", topic=decision.selected_topic.title, content_type=decision.content_type.value),
+            log_and_trace(
+                STAGE_STRATEGY, "complete", topic=decision.selected_topic.title,
+                content_type=decision.content_type.value, weight_adjustments=weight_adjustments,
+            ),
         ],
     }

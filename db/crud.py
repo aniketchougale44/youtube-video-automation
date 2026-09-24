@@ -99,6 +99,27 @@ def summarize_recent_performance(db: Session, limit: int = 5) -> str:
     return "Recent video performance:\n" + "\n".join(lines)
 
 
+def latest_strategy_weight_adjustments(db: Session, lookback: int = 20) -> dict[str, float]:
+    """The most recent non-empty `strategy_weight_adjustments` the Learning Agent produced
+    (graph/nodes/feedback.py::learning_node), read back out of the AgentLog rows its trace is
+    persisted to. Fed into strategy_node's prompt on the next run as an explicit numeric signal
+    alongside the qualitative `past_performance_summary` text. Returns {} when the feedback graph
+    has never run, or every recent run found performance in line with baseline (adjustments={})."""
+    stmt = (
+        select(AgentLog.output_json)
+        .where(AgentLog.stage == PipelineStage.LEARNING)
+        .order_by(AgentLog.created_at.desc())
+        .limit(lookback)
+    )
+    for (payload,) in db.execute(stmt).all():
+        if not isinstance(payload, dict) or payload.get("event") != "complete":
+            continue
+        adjustments = payload.get("adjustments") or {}
+        if adjustments:
+            return {k: float(v) for k, v in adjustments.items()}
+    return {}
+
+
 def persist_trace_as_agent_logs(db: Session, run_id: uuid.UUID, trace: list[dict]) -> None:
     """Best-effort mapping of graph trace events -> AgentLog rows. One row per event; real
     input/output payloads get attached once each node's real logic (not the stub) is wired in."""

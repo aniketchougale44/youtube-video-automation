@@ -16,15 +16,18 @@ def start_run(
     run_id: str | None = None,
     debug_force_reject: dict | None = None,
     past_performance_summary: str | None = None,
+    strategy_weight_adjustments: dict[str, float] | None = None,
 ) -> tuple[str, dict]:
     """Compiles the graph and invokes it from START. Returns (thread_id, final_or_interrupted_state).
-    `past_performance_summary` is pulled from Postgres by the caller (worker/tasks.py) — graph
-    nodes never touch the DB directly, so it has to arrive as part of the initial state."""
+    `past_performance_summary` and `strategy_weight_adjustments` are pulled from Postgres by the
+    caller (worker/tasks.py) — graph nodes never touch the DB directly, so they have to arrive as
+    part of the initial state."""
     run_id = run_id or str(uuid.uuid4())
     thread_id = run_id
     settings_state = initial_state(
         run_id=run_id, thread_id=thread_id, debug_force_reject=debug_force_reject,
         past_performance_summary=past_performance_summary,
+        strategy_weight_adjustments=strategy_weight_adjustments,
     )
 
     app = build_publish_graph().compile(checkpointer=checkpointer)

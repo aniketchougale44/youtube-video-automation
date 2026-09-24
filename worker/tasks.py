@@ -11,6 +11,7 @@ from db.crud import (
     compute_performance_baseline,
     get_run,
     get_video_by_youtube_id,
+    latest_strategy_weight_adjustments,
     persist_performance_snapshot,
     persist_trace_as_agent_logs,
     summarize_recent_performance,
@@ -50,6 +51,7 @@ def run_pipeline_task(self, run_id: str) -> dict:
 
         debug_force_reject = (run.stage_status or {}).get("debug_force_reject", {})
         past_performance_summary = summarize_recent_performance(db)
+        strategy_weight_adjustments = latest_strategy_weight_adjustments(db)
         db.commit()  # release the read transaction — postgres_checkpointer() runs DDL (CREATE
         # INDEX CONCURRENTLY) on a separate connection that would otherwise block waiting on it
 
@@ -59,6 +61,7 @@ def run_pipeline_task(self, run_id: str) -> dict:
                 run_id=run.langgraph_thread_id,
                 debug_force_reject=debug_force_reject,
                 past_performance_summary=past_performance_summary,
+                strategy_weight_adjustments=strategy_weight_adjustments,
             )
 
         interrupted = "__interrupt__" in result
