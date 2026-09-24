@@ -373,11 +373,19 @@ def upload_node(state: PipelineState) -> dict:
             playlist_id=playlist_id,
         )
     else:
-        # video_assembly is still a stub (no real render file yet) — nothing exists to actually
-        # upload, so fall back to the placeholder result rather than failing every run on a
-        # missing file that's expected at this stage of the build.
+        # Scaffolding from when video_assembly_node was a stub: back then a missing render was the
+        # expected state, so this returned a fake "uploaded" result to keep runs moving. The node
+        # renders a real file now, so a missing one means the render genuinely failed — and
+        # reporting UPLOADED for it is actively harmful: the run is recorded as published, the
+        # dashboard shows it green, and the Performance Monitor later pulls analytics for a video
+        # id that was never real. Fail loudly instead.
+        logger.error("upload.render_missing", render_path=assembly.render_path)
         result = UploadResult(
-            youtube_video_id="stub_yt_id_000", status=UploadStatus.UPLOADED, visibility=visibility, quota_units_used=1600
+            youtube_video_id=None,
+            status=UploadStatus.FAILED,
+            visibility=visibility,
+            quota_units_used=0,  # nothing was sent, so nothing was spent
+            error=f"render file missing at {assembly.render_path} — video_assembly produced no output",
         )
 
     return {

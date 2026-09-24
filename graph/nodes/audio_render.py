@@ -28,11 +28,13 @@ import numpy as np
 from moviepy import (
     AudioFileClip,
     ColorClip,
+    CompositeAudioClip,
     CompositeVideoClip,
     ImageClip,
     TextClip,
     VideoClip,
     VideoFileClip,
+    afx,
     concatenate_audioclips,
     concatenate_videoclips,
     vfx,
@@ -43,9 +45,11 @@ from agents.schemas.audio_render import AssemblyOutput, VoiceoverOutput, Voiceov
 from agents.schemas.script import ScriptOutput
 from agents.schemas.visual import AssetOutput, AssetType, SourcedAsset
 from core.logging import get_logger
+from core.settings import get_settings
 from graph.nodes._helpers import log_and_trace
 from graph.state import PipelineState
 from tools import character_assets as character_assets_tool
+from tools import freesound_audio as freesound_audio_tool
 from tools import tts as tts_tool
 from tools.fonts import resolve_font_path
 from tools.media_paths import media_path
@@ -240,6 +244,66 @@ def _clip_for_beat(asset: SourcedAsset | None, duration: float):
     return _ken_burns_image_clip(asset.local_path, duration, zoom_in=asset.beat_index % 2 == 0), None
 
 
+MUSIC_FADE_SECONDS = 2.0
+
+
+def _music_mood(state: PipelineState) -> str:
+    """Freesound search keyword for this run's bed. An explicit setting wins; otherwise it comes
+    from the strategy's chosen topic category, so a nursery-rhyme video and a documentary don't
+    get handed the same music."""
+    settings = get_settings()
+    if settings.background_music_mood:
+        return settings.background_music_mood
+
+    decision = state.get("strategy_decision") or {}
+    topic = decision.get("selected_topic") or {}
+    category = (topic.get("category") or "").strip()
+    return f"{category} background music instrumental" if category else "calm ambient instrumental"
+
+
+def _background_music(state: PipelineState, run_id: str, duration: float):
+    """(attenuated_music_clip_or_None, has_music).
+
+    Every failure path here returns (None, False) — a missing or unmixable music bed is a
+    cosmetic loss, and failing a multi-minute render over it would be absurd. tools.freesound_audio
+    already falls back to a synthesized pad internally, so this only trips on a genuinely broken
+    file or a mixing error.
+    """
+    settings = get_settings()
+    if not settings.enable_background_music:
+        return None, False
+
+    path = media_path(run_id, "audio", "music.mp3")
+    music = None
+    try:
+        freesound_audio_tool.get_sound(_music_mood(state), duration, path)
+        music = AudioFileClip(path)
+        # Sourced sounds are whatever length Freesound had; loop up to the voiceover's length, then
+        # hard-trim, since AudioLoop overshoots to a whole number of repeats.
+        if music.duration < duration:
+            music = music.with_effects([afx.AudioLoop(duration=duration)])
+        music = music.subclipped(0, duration).with_effects(
+            [
+                afx.MultiplyVolume(settings.background_music_volume),
+                afx.AudioFadeIn(min(MUSIC_FADE_SECONDS, duration / 2)),
+                afx.AudioFadeOut(min(MUSIC_FADE_SECONDS, duration / 2)),
+            ]
+        )
+    except Exception as exc:
+        # The clip may have opened before a later step (loop/trim/effects) failed, and it holds an
+        # ffmpeg subprocess -- drop it here rather than leaking one per failed render.
+        if music is not None:
+            try:
+                music.close()
+            except Exception as close_exc:
+                logger.debug("video_assembly.music_close_failed", error=str(close_exc))
+        logger.warning("video_assembly.music_failed", error=str(exc))
+        return None, False
+
+    logger.info("video_assembly.music_ready", path=path, volume=settings.background_music_volume)
+    return music, True
+
+
 def video_assembly_node(state: PipelineState) -> dict:
     trace = log_and_trace(STAGE_ASSEMBLY, "start")
 
@@ -278,7 +342,14 @@ def video_assembly_node(state: PipelineState) -> dict:
 
     video_no_audio = concatenate_videoclips(beat_clips, method="compose")
     full_audio = AudioFileClip(voiceover.full_audio_path)
-    video = video_no_audio.with_audio(full_audio)
+
+    music_clip, has_music = _background_music(state, run_id, full_audio.duration)
+    if music_clip is not None:
+        # Voiceover first in the composite so it stays the dominant track; the bed is already
+        # attenuated to settings.background_music_volume before it gets here.
+        video = video_no_audio.with_audio(CompositeAudioClip([full_audio, music_clip]))
+    else:
+        video = video_no_audio.with_audio(full_audio)
 
     has_captions = False
     try:
@@ -311,6 +382,8 @@ def video_assembly_node(state: PipelineState) -> dict:
         video.write_videofile(render_path, fps=TARGET_FPS, codec="libx264", audio_codec="aac", logger=None)
     finally:
         full_audio.close()
+        if music_clip is not None:
+            music_clip.close()
         for handle in video_handles:
             handle.close()
         video.close()
@@ -321,7 +394,7 @@ def video_assembly_node(state: PipelineState) -> dict:
         resolution=f"{TARGET_W}x{TARGET_H}",
         fps=TARGET_FPS,
         has_captions=has_captions,
-        has_music=False,  # background-music sourcing not implemented
+        has_music=has_music,
     )
 
     return {

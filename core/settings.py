@@ -180,12 +180,22 @@ class Settings(BaseSettings):
     fal_video_resolution: str = "720p"
     fal_video_aspect_ratio: str = "16:9"
 
-    # Background sound for scripts/produce_reel_clip.py's short vertical clips (see
-    # tools/freesound_audio.py) -- the long-form pipeline has no music (see
-    # graph/nodes/audio_render.py's has_music=False). Searched by mood/vibe keyword against
-    # Freesound's CC-licensed library; falls back to a locally synthesized ambient pad when unset
-    # or the search/download fails, so a reel clip is never rendered silent.
+    # Background sound for scripts/produce_reel_clip.py's short vertical clips AND the long-form
+    # pipeline's music bed (see tools/freesound_audio.py, graph/nodes/audio_render.py). Searched by
+    # mood/vibe keyword against Freesound's CC-licensed library; falls back to a locally
+    # synthesized ambient pad when unset or the search/download fails, so nothing renders silent.
     freesound_api_key: str = ""  # free: https://freesound.org/apiv2/apply
+    # Mixes a music bed under the voiceover in video_assembly_node. Safe to leave on with no
+    # Freesound key -- the synthesized pad is the fallback. Sourcing or mixing failures downgrade
+    # to a voiceover-only render (has_music=False) rather than failing the run.
+    enable_background_music: bool = True
+    # Gain applied to the bed relative to the voiceover. Deliberately low: the voiceover is the
+    # content, and anything much above ~0.15 starts competing with it for intelligibility on
+    # phone speakers, which is where most of this content is watched.
+    background_music_volume: float = 0.10
+    # Freesound search keyword. Blank -> derived per run from the strategy's topic category, so a
+    # nursery-rhyme video and a documentary don't get the same bed.
+    background_music_mood: str = ""
 
     # Offline text-to-video model, run by the operator on Google Colab (see colab/
     # wan_video_colab.ipynb + tools/colab_video.py) and reached over a Gradio public URL that
