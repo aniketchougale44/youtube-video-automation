@@ -16,11 +16,15 @@ from graph.nodes.research import (
     trend_research_node,
 )
 from graph.state import initial_state
-from tests.conftest import FAKE_TRENDING_VIDEOS
+from tests.conftest import FAKE_SEARCH_VIDEOS, FAKE_TRENDING_VIDEOS, _days_ago
 
 
 def test_freshness_score_decays_with_age():
-    assert freshness_score(["2026-08-05T00:00:00Z"]) > freshness_score(["2026-07-01T00:00:00Z"])
+    # Relative, not literal dates: freshness_score() floors at 0.0 by ~30 days old, so any pair of
+    # hardcoded dates eventually both sit on the floor and the comparison stops testing decay at
+    # all (it starts failing outright once both are stale). See conftest._days_ago.
+    assert freshness_score([_days_ago(1)]) > freshness_score([_days_ago(10)])
+    assert freshness_score([_days_ago(10)]) > freshness_score([_days_ago(20)])
 
 
 def test_freshness_score_handles_bad_input_gracefully():
@@ -60,14 +64,19 @@ def test_trend_research_node_produces_ranked_candidates():
     output = TrendResearchOutput.model_validate(result["trend_output"])
     assert len(output.candidates) == 2
     assert output.candidates[0].composite_score >= output.candidates[1].composite_score
-    # source_video_ids must trace back to real trending video IDs (never fabricated)
-    real_ids = {v["video_id"] for v in FAKE_TRENDING_VIDEOS}
+    # source_video_ids must trace back to a real retrieved video ID (never fabricated) -- from
+    # either endpoint the node pulls, since raw_videos merges most_popular + search_with_stats
+    real_ids = {v["video_id"] for v in (*FAKE_TRENDING_VIDEOS, *FAKE_SEARCH_VIDEOS)}
     for candidate in output.candidates:
         assert set(candidate.source_video_ids) <= real_ids
 
 
 def test_trend_research_node_raises_when_no_videos_available(monkeypatch):
+    # Both sources have to be emptied, not just most_popular: the node merges them and only raises
+    # when the combined, deduped list is empty. Emptying one alone left search_with_stats live,
+    # which is what made this assertion fail while quietly spending real search.list quota.
     monkeypatch.setattr("tools.youtube.most_popular", lambda **kwargs: [])
+    monkeypatch.setattr("tools.youtube.search_with_stats", lambda *a, **k: [])
     state = initial_state(run_id=str(uuid.uuid4()), thread_id="t1")
     try:
         trend_research_node(state)

@@ -3,9 +3,18 @@ critic retry loops (script QA + compliance), and escalation after max_retries â€
 node logic. Real agent-logic tests land alongside each stage's real implementation."""
 import uuid
 
+import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
+from core.settings import get_settings
 from graph.run import resume_run, start_run
+
+
+@pytest.fixture(autouse=True)
+def _force_human_approval(monkeypatch):
+    """This module validates the human-approval interrupt wiring, so pin REQUIRE_HUMAN_APPROVAL on
+    regardless of what the dev .env sets it to (build_publish_graph reads it at build time)."""
+    monkeypatch.setattr(get_settings(), "require_human_approval", True)
 
 
 def _new_cp() -> MemorySaver:

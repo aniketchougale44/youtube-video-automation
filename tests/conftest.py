@@ -11,8 +11,13 @@ asset_visual, metadata_seo, thumbnail, critic_compliance) is left genuinely real
 external calls (LLM, embeddings, stock media, image gen) mocked — critic_script_qa_node and
 critic_compliance_node specifically must stay real because the retry/escalation tests exercise
 their actual consume_force_reject()/retry_counts control flow, not just their output shape.
+
+The YouTube stubs are backed by a tripwire (see mock_external_apis): tools.youtube's three client
+constructors are patched to raise, so a call this file forgot to stub fails at the seam instead of
+quietly spending the live daily quota that tools.quota debits before each request.
 """
 import os
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from PIL import Image
@@ -26,13 +31,22 @@ from graph.nodes.research import _StrategyChoice, _TopicIdea, _TrendSynthesis
 from graph.nodes.script import _BeatDraft, _ClaimExtraction, _ScriptDraft
 from graph.nodes.visual import _ScenePlanDraft, _VisualPlanDraft
 
+
+def _days_ago(days: float) -> str:
+    """Publish timestamps are relative, never literal dates: freshness_score() measures age against
+    datetime.now(), so a hardcoded date silently ages past the 30-day floor and turns every
+    fixture video into freshness 0.0 — which is how the suite ends up asserting on a score that
+    no longer varies."""
+    return (datetime.now(UTC) - timedelta(days=days)).isoformat().replace("+00:00", "Z")
+
+
 FAKE_TRENDING_VIDEOS = [
     {
         "video_id": "vid1",
         "title": "Fake trending video 1",
         "description": "d",
         "category_id": "27",
-        "published_at": "2026-08-04T00:00:00Z",
+        "published_at": _days_ago(2),
         "channel_title": "c",
         "view_count": 500_000,
         "like_count": 10_000,
@@ -43,11 +57,40 @@ FAKE_TRENDING_VIDEOS = [
         "title": "Fake trending video 2",
         "description": "d",
         "category_id": "27",
-        "published_at": "2026-08-03T00:00:00Z",
+        "published_at": _days_ago(3),
         "channel_title": "c",
         "view_count": 250_000,
         "like_count": 5_000,
         "comment_count": 200,
+    },
+]
+
+# trend_research_node pulls from two YouTube endpoints, not one: most_popular() per configured
+# category AND search_with_stats() per configured trend_search_queries. Both need a stub -- a
+# search.list is 100 quota units against the real daily 10k bucket, so leaving this one live cost
+# ~400 units every time any test touched the node (including every full-graph wiring test).
+FAKE_SEARCH_VIDEOS = [
+    {
+        "video_id": "vid3",
+        "title": "Fake search result 1",
+        "description": "d",
+        "category_id": "27",
+        "published_at": _days_ago(5),
+        "channel_title": "c",
+        "view_count": 120_000,
+        "like_count": 3_000,
+        "comment_count": 150,
+    },
+    {
+        "video_id": "vid4",
+        "title": "Fake search result 2",
+        "description": "d",
+        "category_id": "27",
+        "published_at": _days_ago(7),
+        "channel_title": "c",
+        "view_count": 80_000,
+        "like_count": 1_500,
+        "comment_count": 90,
     },
 ]
 
@@ -158,7 +201,23 @@ def _make_fake_video_assembly_node(tmp_dir: str):
 @pytest.fixture(autouse=True)
 def mock_external_apis(monkeypatch, tmp_path):
     monkeypatch.setattr("tools.youtube.most_popular", lambda **kwargs: FAKE_TRENDING_VIDEOS)
+    monkeypatch.setattr("tools.youtube.search_with_stats", lambda *a, **k: FAKE_SEARCH_VIDEOS)
+    monkeypatch.setattr("tools.youtube.search_competitor_videos", lambda *a, **k: FAKE_SEARCH_VIDEOS)
     monkeypatch.setattr("tools.trends.related_queries", lambda *a, **k: {"rising": ["x"], "top": ["y", "z"]})
+
+    # Tripwire, not decoration: every stub above is a named function, so adding one real call
+    # anywhere in the pipeline reintroduces live API traffic silently -- and because tools.youtube
+    # debits tools.quota's Redis bucket *before* firing, a leak spends the real daily 10k quota
+    # from a test run and only shows up as a mystery shortfall in production hours later. Killing
+    # the client constructors means any unmocked call fails loudly at the seam instead.
+    def _no_live_youtube_client(*_a, **_k):
+        raise AssertionError(
+            "a test tried to build a real YouTube API client -- this spends live quota. Add a stub "
+            "for the tools.youtube.* function being called to tests/conftest.py's autouse fixture."
+        )
+
+    for client_factory in ("_public_client", "_oauth_client", "_analytics_client"):
+        monkeypatch.setattr(f"tools.youtube.{client_factory}", _no_live_youtube_client)
 
     for module_name in ("graph.nodes.research", "graph.nodes.script", "graph.nodes.visual", "graph.nodes.publish"):
         monkeypatch.setattr(f"{module_name}.call_structured", _fake_call_structured)
