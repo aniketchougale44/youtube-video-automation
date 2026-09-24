@@ -341,19 +341,21 @@ def upload_node(state: PipelineState) -> dict:
     thumbnails = ThumbnailOutput.model_validate(state["thumbnail_output"])
     trace = log_and_trace(STAGE_UPLOAD, "start", title=metadata.selected_title)
 
+    settings = get_settings()
+    visibility = Visibility(settings.youtube_upload_visibility)
+
     if os.path.exists(assembly.render_path):
         thumbnail_path = thumbnails.candidates[0].image_path if thumbnails.candidates else None
         video_id = youtube_tool.resumable_upload(
             file_path=assembly.render_path,
             metadata={"title": metadata.selected_title, "description": metadata.description, "tags": metadata.tags},
             thumbnail_path=thumbnail_path,
-            visibility=Visibility.UNLISTED.value,
+            visibility=visibility.value,
         )
 
         # Best-effort, like thumbnail_set above: the video itself already published successfully,
         # which is the part that actually matters, so a playlist hiccup shouldn't fail the run.
         playlist_id = None
-        settings = get_settings()
         try:
             playlist_id = youtube_tool.get_or_create_playlist(
                 title=settings.youtube_nursery_playlist_title,
@@ -366,7 +368,7 @@ def upload_node(state: PipelineState) -> dict:
         result = UploadResult(
             youtube_video_id=video_id,
             status=UploadStatus.UPLOADED,
-            visibility=Visibility.UNLISTED,
+            visibility=visibility,
             quota_units_used=1600,
             playlist_id=playlist_id,
         )
@@ -375,7 +377,7 @@ def upload_node(state: PipelineState) -> dict:
         # upload, so fall back to the placeholder result rather than failing every run on a
         # missing file that's expected at this stage of the build.
         result = UploadResult(
-            youtube_video_id="stub_yt_id_000", status=UploadStatus.UPLOADED, visibility=Visibility.UNLISTED, quota_units_used=1600
+            youtube_video_id="stub_yt_id_000", status=UploadStatus.UPLOADED, visibility=visibility, quota_units_used=1600
         )
 
     return {
