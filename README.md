@@ -31,7 +31,13 @@ credentials — see [Go-live checklist](#go-live-checklist) below.
   originality gate via pgvector embedding similarity against both prior YouTube transcripts and
   our own back catalog (`tools/embeddings.py`), LLM claim extraction + Tavily-backed verification.
 - **Visual Planning + Asset sourcing** (`graph/nodes/visual.py`) — LLM scene plan, Pexels/Pixabay
-  stock search with AI image-gen fallback when no stock match exists.
+  stock search with AI image-gen fallback when no stock match exists. Optionally (off by default,
+  `ENABLE_AI_VIDEO_BEATS`) the planner may route up to `MAX_AI_VIDEO_BEATS_PER_RUN` standout beats
+  to a real text-to-video generation. `AI_VIDEO_PROVIDER` picks the source: `colab` = a free
+  offline **Wan2.1-T2V-1.3B** model the operator runs on Google Colab (`colab/wan_video_colab.ipynb`,
+  `tools/colab_video.py`) and nothing else; `auto` = that Colab endpoint first, then hosted
+  fal.ai → Hugging Face → NVIDIA → Veo (`tools/fal_video.py`, `hf_video.py`, `nvidia_video.py`,
+  `veo_video.py`). Any miss falls back to the mascot animation.
 - **Voiceover + Video Assembly** (`graph/nodes/audio_render.py`) — real TTS synthesis, MoviePy/
   FFmpeg render with caption burn-in.
 - **Metadata/SEO + Thumbnail + Compliance critic** (`graph/nodes/publish.py`) — LLM-driven SEO
@@ -42,9 +48,16 @@ credentials — see [Go-live checklist](#go-live-checklist) below.
 - **Performance Monitor + Learning** (`graph/nodes/feedback.py`, `graph/feedback_graph.py`) — real
   YouTube Analytics API pull (views/likes/comments/retention) per video/window, compared against a
   Postgres-computed baseline across prior published videos; the resulting `PerformanceSnapshot` is
-  persisted so the *next* run's Strategy Agent sees it via `summarize_recent_performance`. Note:
-  YouTube's public Analytics API doesn't expose thumbnail impressions/CTR (that's Studio-UI-only),
-  so those two fields are always `0` — a real API limitation, not something unfinished here.
+  persisted so the *next* run's Strategy Agent sees it via `summarize_recent_performance`, and the
+  numeric `LearningUpdate.strategy_weight_adjustments` it derives are read back into `strategy_node`'s
+  prompt as an explicit signal (`crud.latest_strategy_weight_adjustments`). Note: YouTube's public
+  Analytics API doesn't expose thumbnail impressions/CTR (that's Studio-UI-only), so those two
+  fields are always `0` — a real API limitation, not something unfinished here.
+- **PubSubHubbub webhook** (`api/routes/webhooks.py`, `tools/websub.py`) — `POST/GET
+  /api/webhooks/youtube` is a real WebSub subscriber: once subscribed (`python -m tools.websub
+  subscribe`, auto-renewed by `scheduler/beat.py`), Google's hub pushes channel changes in
+  near-real-time — new/updated entries backfill `Video.published_at`, removals fire a CRITICAL
+  notification.
 - **Notifications** (`tools/notify.py`) — Slack, Telegram, and email are all real; each fires
   independently whenever its own credentials are configured.
 - **Shared LLM client** (`core/llm.py`) — tries Anthropic, OpenAI, Groq, then Gemini in order
@@ -283,8 +296,13 @@ All stages have real logic (see [Status](#status-every-stage-has-real-logic) abo
 remaining work to run this unattended in production is the three operator steps in the
 [go-live checklist](#go-live-checklist). Beyond that, reasonable next investments:
 
-- Wire `LearningUpdate.strategy_weight_adjustments` (currently computed and persisted to
-  `AgentLog`, but not yet read back) into `strategy_node`'s prompt as an explicit numeric signal,
-  on top of the qualitative `past_performance_summary` text it already reads.
-- A YouTube PubSubHubbub webhook (`api/routes/webhooks.py` is currently a placeholder) to react to
-  channel events in near-real-time instead of only via the hourly scheduler poll.
+- Replace the estimated cost table with measured `db.models.Cost` numbers once a few real runs
+  have logged provider spend.
+- Feed `strategy_weight_adjustments` back as a per-key weighting on the candidates' composite
+  scores directly (code-side), not only as prompt text for the LLM to weigh.
+
+Recently completed (both former "what's next" items): the numeric
+`LearningUpdate.strategy_weight_adjustments` are now read back into `strategy_node` via
+`crud.latest_strategy_weight_adjustments`, and `api/routes/webhooks.py` is now a working YouTube
+PubSubHubbub subscriber (`tools/websub.py` manages the subscription; `scheduler/beat.py` renews
+it).
