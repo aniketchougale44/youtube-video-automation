@@ -202,15 +202,22 @@ class Settings(BaseSettings):
     # changes every notebook restart. Used by scripts/produce_reel_clip.py and -- when
     # ai_video_provider is "auto" or "colab" -- by the main pipeline's AI_VIDEO beats.
     #
-    # Model: Wan-AI/Wan2.1-T2V-1.3B (diffusers WanPipeline), Apache-2.0. The 1.3B DiT is built for
-    # ~8GB consumer cards; the heavy part is the UMT5-XXL text encoder, which the notebook keeps on
-    # CPU via enable_model_cpu_offload() (+ VAE tiling) so peak VRAM stays ~8-9GB and it fits a
-    # free-tier T4. Native 832x480, 16fps; num_frames must be 4k+1 (VAE temporal stride 4) -- the
-    # notebook rounds to the nearest valid value. ~10-20 min/clip on a T4 at 25 steps.
+    # Model: Wan-AI/Wan2.1-T2V-1.3B (diffusers WanPipeline), Apache-2.0. Native 832x480, 16fps;
+    # num_frames must be 4k+1 (VAE temporal stride 4) -- the notebook rounds to the nearest valid
+    # value. ~6-12 min/clip on a T4 at 25 steps.
+    #
+    # NOTE: do NOT "simplify" the notebook back to enable_model_cpu_offload(). That keeps the
+    # 22.7GB-fp32 / ~11.4GB-fp16 UMT5-XXL text encoder in system RAM, of which a free Colab T4 has
+    # ~12.7GB, and the kernel is SIGKILLed with no traceback. The notebook instead loads the
+    # encoder onto the GPU (which has more room than RAM at 14.6GB), frees it, then swaps the
+    # transformer in -- one big model resident at a time -- and runs the download and encode in
+    # subprocesses so an OOM-kill cannot take the Gradio server down with it. Its header documents
+    # all three crash modes.
+    #
     # History (git log has the code): ModelScope-1.7b (256x256, too soft), CogVideoX-5B/-2B (~9GB
     # T5-XXL encoder -> 30-45min/clip or OOM), SD1.5/DreamShaper+AnimateDiff (flat retrofitted
-    # motion), DreamShaper-XL+SVD-XT (wobbly, video stage never saw the prompt). Wan2.1-1.3B with
-    # the text encoder actually offloaded is the first that's both T4-viable and real video motion.
+    # motion), DreamShaper-XL+SVD-XT (wobbly, video stage never saw the prompt). Wan2.1-1.3B is the
+    # first that's both T4-viable and real video motion.
     # On Colab Pro (L4/A100) switch the notebook to Wan-AI/Wan2.2-TI2V-5B for 720p.
     colab_video_url: str = ""
     colab_video_num_frames: int = 81  # 4k+1 -> ~5s at 16fps. produce_reel_clip.py loops it up to

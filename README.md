@@ -32,19 +32,32 @@ credentials — see [Go-live checklist](#go-live-checklist) below.
   our own back catalog (`tools/embeddings.py`), LLM claim extraction + Tavily-backed verification.
 - **Visual Planning + Asset sourcing** (`graph/nodes/visual.py`) — LLM scene plan, Pexels/Pixabay
   stock search with AI image-gen fallback when no stock match exists. Optionally (off by default,
-  `ENABLE_AI_VIDEO_BEATS`) the planner may route up to `MAX_AI_VIDEO_BEATS_PER_RUN` standout beats
-  to a real text-to-video generation. `AI_VIDEO_PROVIDER` picks the source: `colab` = a free
+  `ENABLE_AI_VIDEO_BEATS`) the planner routes beats to a real text-to-video generation.
+  `MAX_AI_VIDEO_BEATS_PER_RUN` sets how aggressively: **`0` means no cap**, which also flips the
+  planning prompt so AI_VIDEO becomes the default for every narrative beat — that is what makes a
+  render an animated story rather than a mostly-mascot slideshow, and it is the right setting for
+  the free Colab generator where clips cost time rather than money. A positive value caps it in
+  beat order and tells the planner to reserve those beats for standout moments, which is the right
+  shape for the metered hosted providers. `AI_VIDEO_PROVIDER` picks the source: `colab` = a free
   offline **Wan2.1-T2V-1.3B** model the operator runs on Google Colab (`colab/wan_video_colab.ipynb`,
   `tools/colab_video.py`) and nothing else; `auto` = that Colab endpoint first, then hosted
   fal.ai → Hugging Face → NVIDIA → Veo (`tools/fal_video.py`, `hf_video.py`, `nvidia_video.py`,
   `veo_video.py`). Any miss falls back to the mascot animation.
 - **Voiceover + Video Assembly** (`graph/nodes/audio_render.py`) — real TTS synthesis, MoviePy/
-  FFmpeg render with caption burn-in.
+  FFmpeg render with caption burn-in, and a background-music bed mixed under the voiceover
+  (`ENABLE_BACKGROUND_MUSIC`, on by default). The Freesound search keyword is derived from the
+  strategy's topic category unless `BACKGROUND_MUSIC_MOOD` overrides it, and
+  `tools/freesound_audio.py` falls back to a locally synthesized ambient pad when no
+  `FREESOUND_API_KEY` is set — so this needs no signup. Sourcing or mixing failures degrade to a
+  voiceover-only render (`has_music=False`) rather than failing a multi-minute encode.
 - **Metadata/SEO + Thumbnail + Compliance critic** (`graph/nodes/publish.py`) — LLM-driven SEO
   copy and thumbnail candidates, a compliance gate combining a similarity-based copyright-risk
   proxy, an LLM community-guidelines self-check, and AV-sync/spec checks against the actual
   render.
-- **Upload** (`::upload_node`) — real resumable `videos.insert` via OAuth (`tools/youtube.py`).
+- **Upload** (`::upload_node`) — real resumable `videos.insert` via OAuth (`tools/youtube.py`), at
+  `YOUTUBE_UPLOAD_VISIBILITY`, then best-effort playlist add. A missing render file is reported as
+  `UploadStatus.FAILED` with no video id and no quota spent, rather than a synthetic success — a
+  fake id would be recorded as published and later queried by the Performance Monitor.
 - **Performance Monitor + Learning** (`graph/nodes/feedback.py`, `graph/feedback_graph.py`) — real
   YouTube Analytics API pull (views/likes/comments/retention) per video/window, compared against a
   Postgres-computed baseline across prior published videos; the resulting `PerformanceSnapshot` is
@@ -91,8 +104,11 @@ locally) before `docker compose up` / `alembic upgrade head`.
 default:
 - **Voiceover** (`TTS_PROVIDER=edge`) — edge-tts, Microsoft Edge's neural voices, keyless.
 - **Images/thumbnails** (`IMAGE_GEN_PROVIDER=pollinations`) — Pollinations.ai, keyless.
-- Both automatically fall back to their free path even if you set the paid provider
-  (`openai`) but its key is missing or out of credits — see `tools/tts.py` / `tools/image_gen.py`.
+- **Background music** (`ENABLE_BACKGROUND_MUSIC=true`) — a synthesized ambient pad, keyless; set
+  `FREESOUND_API_KEY` (free) to source real CC-licensed beds instead.
+- All three automatically fall back to their free path even if you set the paid/keyed provider but
+  its key is missing or out of credits — see `tools/tts.py` / `tools/image_gen.py` /
+  `tools/freesound_audio.py`.
 
 Optional, free, not blocking: `PEXELS_API_KEY` / `PIXABAY_API_KEY` (real stock footage/photos
 instead of always falling back to AI image-gen — both have free tiers, sign up for either),
@@ -261,6 +277,29 @@ Pass `debug_force_reject={"critic_script_qa": 2}` to `start_run` to exercise the
 a value >= `MAX_CRITIC_RETRIES` to exercise escalation — this hook exists purely to validate graph
 wiring before real critic logic lands.
 
+### 6. Free AI video generation via Google Colab
+
+`colab/wan_video_colab.ipynb` runs Wan2.1-T2V-1.3B on a free Colab T4 and exposes it as a Gradio
+endpoint that `tools/colab_video.py` calls. Open it in Colab, `Runtime -> Change runtime type ->
+T4 GPU`, `Run all`, then paste the `https://xxxx.gradio.live` URL it prints into `.env` as
+`COLAB_VIDEO_URL`. **It changes on every restart**, and when the session dies the pipeline falls
+AI_VIDEO beats back to the mascot rather than failing the run.
+
+Two things are worth knowing before you spend an afternoon on it:
+
+- **The first run downloads ~23 GB** (the UMT5-XXL text encoder is 22.7 GB fp32 and the repo has
+  no fp16 copy). Mount Drive in the notebook's optional cell if you have ~30 GB spare, and that
+  becomes a one-time cost instead of a per-session one.
+- **It is memory-bound, not compute-bound.** A free T4 has ~12.7 GB RAM and ~14.6 GB VRAM; the
+  encoder alone is ~11.4 GB in fp16 and the transformer+VAE another ~2.9 GB. The notebook
+  therefore keeps the pipeline on the CPU and swaps one model onto the GPU at a time, and runs
+  the download and the encode in **subprocesses** so an OOM-kill surfaces as an error instead of
+  silently killing the kernel and the Gradio server. Its header documents the three arrangements
+  that crash and why — worth reading before changing that cell.
+
+Budget roughly 6-12 min per beat on a free T4, so keep scripts short until you are on Colab Pro.
+A metered provider (`AI_VIDEO_PROVIDER=auto`, ~$0.15/clip on fal.ai) avoids all of the above.
+
 ## Estimated cost per video
 
 Two cost profiles, depending on which providers you configure:
@@ -301,8 +340,14 @@ remaining work to run this unattended in production is the three operator steps 
 - Feed `strategy_weight_adjustments` back as a per-key weighting on the candidates' composite
   scores directly (code-side), not only as prompt text for the LLM to weigh.
 
-Recently completed (both former "what's next" items): the numeric
-`LearningUpdate.strategy_weight_adjustments` are now read back into `strategy_node` via
-`crud.latest_strategy_weight_adjustments`, and `api/routes/webhooks.py` is now a working YouTube
-PubSubHubbub subscriber (`tools/websub.py` manages the subscription; `scheduler/beat.py` renews
-it).
+Recently completed: the numeric `LearningUpdate.strategy_weight_adjustments` are now read
+back into `strategy_node` via `crud.latest_strategy_weight_adjustments`; `api/routes/webhooks.py`
+is a working YouTube PubSubHubbub subscriber (`tools/websub.py` manages the subscription,
+`scheduler/beat.py` renews it); AI_VIDEO beats generate real motion via the free Colab endpoint;
+and `video_assembly_node` mixes a background-music bed.
+
+Two gaps found while auditing that claim, both now closed: `upload_node` used to report
+`UPLOADED` with a synthetic `stub_yt_id_000` when the render file was missing (scaffolding from
+when `video_assembly_node` was a stub — it recorded failed runs as published and left the
+Performance Monitor querying an id that never existed), and background music was never wired in
+despite `tools/freesound_audio.py` already existing.

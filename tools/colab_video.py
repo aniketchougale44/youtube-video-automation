@@ -3,11 +3,11 @@ scripts/produce_reel_clip.py and -- when settings.ai_video_provider is "colab" o
 main pipeline's AI_VIDEO beats (graph/nodes/visual.py::_try_ai_video).
 
 Model: Wan-AI/Wan2.1-T2V-1.3B (Apache-2.0), the smallest real video-diffusion transformer that
-still gives genuine motion. The notebook keeps its UMT5-XXL text encoder on CPU
-(enable_model_cpu_offload) so peak VRAM stays ~8-9GB and it runs on a free-tier T4 -- earlier
-attempts (ModelScope-1.7b too soft; CogVideoX-2B/5B's ~9GB T5-XXL encoder OOM'd or ran 30-45
-min/clip; SD1.5/DreamShaper+AnimateDiff had flat retrofitted motion) are in git history and the
-notebook's own markdown. Native 832x480 @ 16fps, ~10-20 min/clip on a T4.
+still gives genuine motion. Native 832x480 @ 16fps, ~6-12 min/clip on a T4. Earlier attempts
+(ModelScope-1.7b too soft; CogVideoX-2B/5B's ~9GB T5-XXL encoder OOM'd or ran 30-45 min/clip;
+SD1.5/DreamShaper+AnimateDiff had flat retrofitted motion) are in git history and the notebook's
+own markdown. The notebook is memory-bound rather than compute-bound and swaps one model onto the
+GPU at a time -- see its header before changing how it loads anything.
 
 This has no stable/managed endpoint: colab_video_url must be a live Gradio public URL from a
 currently-running Colab session (the notebook prints it on its last cell) -- it changes every
