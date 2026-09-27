@@ -10,14 +10,15 @@ agents for quality and policy compliance, with a human-approval gate before anyt
 > transcript. The Script QA critic hard-blocks on similarity/plagiarism before a script can
 > proceed.
 
-## Status: every stage has real logic
+## Capabilities
 
-The full pipeline is wired end-to-end (every node, every DB table, the FastAPI control API +
-review dashboard, the Celery worker, the APScheduler cron process) and every agent/critic node
-runs real logic, not placeholder data — verified by running the graph through the happy path,
-both critic retry loops, escalation, the human-approval interrupt/resume cycle, and the delayed
-feedback graph. What's left is not code, it's the operator setting up their own accounts and
-credentials — see [Go-live checklist](#go-live-checklist) below.
+The system runs end to end: every agent and critic node, the Postgres schema, the FastAPI control
+API and review dashboard, the Celery worker, and the APScheduler cron process. The test suite
+covers the happy path, both critic retry loops, escalation, the human-approval interrupt/resume
+cycle, and the delayed feedback graph.
+
+Running it against your own channel takes two credentials only you can create — an LLM provider
+key and a YouTube OAuth token. See the [go-live checklist](#go-live-checklist).
 
 - **Trend Research Agent** (`graph/nodes/research.py::trend_research_node`) — pulls real YouTube
   "most popular" videos (`tools/youtube.py`, API-key auth), has an LLM cluster them into original
@@ -63,9 +64,9 @@ credentials — see [Go-live checklist](#go-live-checklist) below.
   Postgres-computed baseline across prior published videos; the resulting `PerformanceSnapshot` is
   persisted so the *next* run's Strategy Agent sees it via `summarize_recent_performance`, and the
   numeric `LearningUpdate.strategy_weight_adjustments` it derives are read back into `strategy_node`'s
-  prompt as an explicit signal (`crud.latest_strategy_weight_adjustments`). Note: YouTube's public
-  Analytics API doesn't expose thumbnail impressions/CTR (that's Studio-UI-only), so those two
-  fields are always `0` — a real API limitation, not something unfinished here.
+  prompt as an explicit signal (`crud.latest_strategy_weight_adjustments`). Thumbnail impressions and CTR are
+  reported as `0`: YouTube exposes those only in the Studio UI, not through the public Analytics
+  API.
 - **PubSubHubbub webhook** (`api/routes/webhooks.py`, `tools/websub.py`) — `POST/GET
   /api/webhooks/youtube` is a real WebSub subscriber: once subscribed (`python -m tools.websub
   subscribe`, auto-renewed by `scheduler/beat.py`), Google's hub pushes channel changes in
@@ -196,7 +197,7 @@ flowchart LR
 
 ```
 agents/schemas/   Pydantic I/O models for every worker + critic agent
-graph/            LangGraph state, node stubs, supervisor graph, checkpointer
+graph/            LangGraph state, agent nodes, supervisor graph, checkpointer
   nodes/          one module per agent group (research, script, visual, audio_render, publish, feedback, escalation)
 api/              FastAPI app: control API (/api/runs) + review dashboard (/dashboard)
 worker/           Celery app + tasks (executes the graph outside the request/response cycle)
@@ -208,7 +209,7 @@ core/             Settings (pydantic-settings) + structlog config
 docker/           Dockerfile (shared by api/worker/scheduler; command differs per service)
 ```
 
-## Production-grade properties already in place
+## Production hardening
 
 | Requirement | Where |
 |---|---|
@@ -218,7 +219,6 @@ docker/           Dockerfile (shared by api/worker/scheduler; command differs pe
 | Retry + circuit breaker on every external call | `tools/resilience.py` (`tenacity` exponential backoff + jitter, per-provider `CircuitBreaker`) wraps every function in `tools/youtube.py`, `tools/trends.py`, `tools/research.py`, `tools/tts.py`, `tools/stock_media.py`, `tools/image_gen.py` |
 | Critic quality gate with bounded retries | `graph/builder.py` conditional edges: `critic_script_qa`/`critic_compliance` loop back up to `MAX_CRITIC_RETRIES` times, then route to `escalate_node` which notifies a human via `tools/notify.py` |
 | Structured observability | `core/logging.py` (structlog) — every node call logs a structured event; `graph/state.py`'s `trace` accumulator captures the full run as a JSON timeline, persisted via `db/crud.persist_trace_as_agent_logs` into `AgentLog` |
-| Cost tracking | `db.models.Cost` table (one row per stage/provider spend); `agents.schemas.common.StageCost` is the structured shape each node will report once real provider calls are wired in |
 | Human-in-the-loop, toggleable | `graph/nodes/publish.human_approval_node` uses LangGraph `interrupt()`; `REQUIRE_HUMAN_APPROVAL=false` swaps in `auto_approve_node` at graph-build time |
 | Scheduling decoupled from API | `scheduler/beat.py` is its own process/container, never started inside the FastAPI app |
 | Secrets via env only | `core/settings.py` (pydantic-settings) + `.env.example` documents every key; nothing hardcoded |
@@ -261,8 +261,9 @@ celery -A worker.celery_app worker --loglevel=info   # separate terminal
 python -m scheduler.beat                              # separate terminal
 ```
 
-### 5. Exercise the graph without any external services
-The publish graph runs fully in-memory with stub node logic — no DB/Redis/API keys needed:
+### 5. Run the graph without Docker
+An in-memory checkpointer runs the publish graph with no Postgres or Redis. The nodes are real, so
+provider keys still apply — at minimum an LLM key and `YOUTUBE_API_KEY`:
 ```python
 from langgraph.checkpoint.memory import MemorySaver
 from graph.run import start_run, resume_run
@@ -274,8 +275,8 @@ resumed = resume_run(cp, thread_id, {"run_id": thread_id, "approved": True, "rev
 print(resumed["upload_result"])
 ```
 Pass `debug_force_reject={"critic_script_qa": 2}` to `start_run` to exercise the retry loop, or
-a value >= `MAX_CRITIC_RETRIES` to exercise escalation — this hook exists purely to validate graph
-wiring before real critic logic lands.
+a value >= `MAX_CRITIC_RETRIES` to exercise escalation. The hook forces a critic verdict so the
+routing can be tested deterministically, without having to craft input the real critic rejects.
 
 ### 6. Free AI video generation via Google Colab
 
@@ -329,25 +330,12 @@ default cadence) that's roughly **$7-8/month** in variable API spend on the paid
 the free path. `db.models.Cost` is where actual per-run spend gets logged once each tool wrapper
 reports real provider costs, so this table can be replaced with measured numbers.
 
-## What's next
+## Roadmap
 
-All stages have real logic (see [Status](#status-every-stage-has-real-logic) above) and the only
-remaining work to run this unattended in production is the three operator steps in the
-[go-live checklist](#go-live-checklist). Beyond that, reasonable next investments:
-
-- Replace the estimated cost table with measured `db.models.Cost` numbers once a few real runs
-  have logged provider spend.
-- Feed `strategy_weight_adjustments` back as a per-key weighting on the candidates' composite
-  scores directly (code-side), not only as prompt text for the LLM to weigh.
-
-Recently completed: the numeric `LearningUpdate.strategy_weight_adjustments` are now read
-back into `strategy_node` via `crud.latest_strategy_weight_adjustments`; `api/routes/webhooks.py`
-is a working YouTube PubSubHubbub subscriber (`tools/websub.py` manages the subscription,
-`scheduler/beat.py` renews it); AI_VIDEO beats generate real motion via the free Colab endpoint;
-and `video_assembly_node` mixes a background-music bed.
-
-Two gaps found while auditing that claim, both now closed: `upload_node` used to report
-`UPLOADED` with a synthetic `stub_yt_id_000` when the render file was missing (scaffolding from
-when `video_assembly_node` was a stub — it recorded failed runs as published and left the
-Performance Monitor querying an id that never existed), and background music was never wired in
-despite `tools/freesound_audio.py` already existing.
+- Per-run cost capture. The `db.models.Cost` table and the `agents.schemas.common.StageCost`
+  shape exist, but no stage reports into them yet, so the cost table above is estimated rather
+  than measured.
+- Apply `strategy_weight_adjustments` as a direct weighting on candidates' composite scores in
+  code, rather than only as prompt text for the Strategy Agent to weigh.
+- Image-to-video for AI_VIDEO beats, so a character keeps a consistent look across a story
+  (text-to-video has no memory between beats; `Wan2.2-TI2V-5B` supports both modes).
