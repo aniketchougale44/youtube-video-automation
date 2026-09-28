@@ -44,7 +44,13 @@ def _openai_call(text: str, output_path: str, voice: str) -> str:
     return output_path
 
 
-@with_resilience(provider="edge_tts")
+# max_attempts=5 rather than the default 3: edge-tts is a free, unauthenticated endpoint that
+# intermittently answers with NoAudioReceived, and a long script makes one call per beat (17 on a
+# real run), so the chance of at least one transient failure per run is high. Three attempts span
+# only ~15s of jittered backoff, which a real outage observed here outlasted; five spans ~60s.
+# A failure here is no longer catastrophic -- graph.run resumes from the checkpoint rather than
+# replaying the pipeline -- but the cheapest fix is still not to fail.
+@with_resilience(provider="edge_tts", max_attempts=5)
 def _edge_call(text: str, output_path: str, voice: str, rate: str = "+0%") -> str:
     import edge_tts
 

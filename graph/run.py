@@ -33,8 +33,24 @@ def start_run(
     app = build_publish_graph().compile(checkpointer=checkpointer)
     config = {"configurable": {"thread_id": thread_id}}
 
-    logger.info("run.start", run_id=run_id)
-    result = app.invoke(settings_state, config=config)
+    # Resume rather than restart when this thread already has work in flight.
+    #
+    # Passing a fresh initial_state re-seeds every key and re-enters at START, so a Celery retry
+    # (worker.run_pipeline_task retries 3x) re-ran the entire pipeline from trend_research after a
+    # transient failure late in the graph -- observed costing ~500 YouTube quota units and ~25min
+    # of LLM/render work per retry, for a single flaky TTS call during voiceover. Invoking with
+    # None is LangGraph's "continue from the checkpoint" form; `next` is non-empty exactly when a
+    # previous attempt left tasks pending, and empty for both a fresh thread and a finished one.
+    #
+    # This is also what stops a retry re-uploading: a failure after upload_node would otherwise
+    # replay the whole graph, upload included.
+    pending = app.get_state(config).next
+    if pending:
+        logger.info("run.resume_pending", run_id=run_id, pending=list(pending))
+        result = app.invoke(None, config=config)
+    else:
+        logger.info("run.start", run_id=run_id)
+        result = app.invoke(settings_state, config=config)
     return thread_id, result
 
 
