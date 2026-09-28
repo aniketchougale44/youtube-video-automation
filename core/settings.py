@@ -139,13 +139,17 @@ class Settings(BaseSettings):
     # AI video generation (asset_visual_node enforces it in beat order; the visual-planning LLM is
     # told the same number so it reserves AI_VIDEO for the standout, motion-worthy beats rather
     # than spreading a small budget thin).
-    #   0 -> NO CAP: every beat the planner routes to AI_VIDEO generates a real clip. This is what
-    #        makes the output an actually-animated story rather than a mostly-mascot slideshow, and
-    #        it's the right setting for the free Colab generator where clips cost time, not money.
-    #        Budget accordingly: ~6-12 min per beat on a free T4, so a 12-beat script is ~2 hours.
-    #   >0 -> cap, for the metered hosted generators where each beat is a real billed generation.
+    #   >0 -> cap: the planner reserves AI_VIDEO for that many standout beats and routes the rest
+    #        to BROLL/AI_IMAGE. This is the default because it degrades well -- if the generator is
+    #        unavailable those N beats fall back to the mascot and the rest still get real stock
+    #        footage. It is also what the metered hosted generators want, each beat being billed.
+    #   0 -> NO CAP: AI_VIDEO becomes the planner's default for every narrative beat. Only set this
+    #        with a generator you know works. Measured on a live run: with cap=0 and no reachable
+    #        generator, 9 of 9 beats routed to AI_VIDEO, every one failed, and the stock path was
+    #        never reached at all -- so adding Pexels/Pixabay keys changed nothing. The same script
+    #        at cap=3 routed 7 of 9 to BROLL. Uncapped also costs ~6-12 min per beat on a free T4.
     # enable_ai_video_beats=False still wins over either -- it zeroes the budget outright.
-    max_ai_video_beats_per_run: int = 0
+    max_ai_video_beats_per_run: int = 3
     # Primary generator (see tools/hf_video.py): Hugging Face Inference Providers, routed to a
     # fal.ai-hosted Wan2.2-TI2V-5B (Apache-2.0, no revenue-cap restrictions, confirmed pure
     # text-to-video). Free accounts get a small monthly credit (~$0.10, well under one clip's
