@@ -69,12 +69,17 @@ class _VisualPlanDraft(BaseModel):
 
 _VISUAL_PLANNING_SYSTEM_PROMPT = (
     "You are a video visual director. For each script beat, choose how it should be shown: BROLL "
-    "(real-world stock footage/photos) for concrete, demonstrable, real-world content — give 2-5 "
-    "generic search_keywords good for stock-footage search (avoid proper nouns/brand names that "
-    "won't have stock matches). AI_IMAGE for abstract, conceptual, or hard-to-film content — give "
-    "a descriptive ai_image_prompt instead. Only use CHART or MOTION_GRAPHIC for beats that "
-    "explicitly present numeric/statistical data; prefer AI_IMAGE for anything else abstract, "
-    "since no chart-rendering pipeline exists downstream of this plan."
+    "(real-world stock footage/photos) for concrete, demonstrable, real-world content. AI_IMAGE "
+    "for abstract, conceptual, or hard-to-film content — give a descriptive ai_image_prompt for "
+    "those. Only use CHART or MOTION_GRAPHIC for beats that explicitly present numeric/statistical "
+    "data; prefer AI_IMAGE for anything else abstract, since no chart-rendering pipeline exists "
+    "downstream of this plan. "
+    "ALWAYS fill in 2-5 generic search_keywords, for every beat, whatever scene_type you chose — "
+    "they are the fallback that gets used whenever a generated asset can't be produced, and a beat "
+    "without them can only fall back to a generic mascot shot. Keep them good for stock-footage "
+    "search: plain nouns and actions, no proper nouns or brand names. For an abstract beat, "
+    "describe the nearest filmable thing (a beat about 'the magic of learning' might search "
+    "'child reading book', 'classroom lightbulb moment')."
 )
 
 
@@ -85,7 +90,10 @@ _UNCAPPED_AI_VIDEO_PROMPT = (
     "art style repeated verbatim across beats (the generator has no memory between beats, so the "
     "style words are the only thing keeping the look continuous). Only fall back to BROLL for a "
     "beat that genuinely needs real-world documentary footage, or to CHART/MOTION_GRAPHIC for a "
-    "beat that explicitly presents numeric data."
+    "beat that explicitly presents numeric data. "
+    "Fill in 2-5 generic stock search_keywords for every beat as well, even the AI_VIDEO ones: "
+    "video generation is slow and fails often, and those keywords are what lets a failed beat use "
+    "real footage instead of a generic mascot shot."
 )
 
 
@@ -94,8 +102,9 @@ def _capped_ai_video_prompt(cap: int) -> str:
         f" AI_VIDEO is also available, but only for at most {cap} beat(s) in the whole script — "
         "reserve it for a single standout, motion-worthy moment (e.g. the hook/opening beat), not "
         "routine content, since each one is a slow, costly real video generation; give a "
-        "descriptive ai_image_prompt the same way as for AI_IMAGE. Any beat you don't use it on "
-        "should fall back to your normal BROLL/AI_IMAGE/CHART/MOTION_GRAPHIC choice."
+        "descriptive ai_image_prompt the same way as for AI_IMAGE, and search_keywords too so a "
+        "failed generation can still use real footage. Any beat you don't use it on should fall "
+        "back to your normal BROLL/AI_IMAGE/CHART/MOTION_GRAPHIC choice."
     )
 
 
@@ -304,7 +313,14 @@ def asset_visual_node(state: PipelineState) -> dict:
         asset = None
         if scene.scene_type == SceneType.AI_VIDEO and scene.beat_index in ai_video_budget_indices:
             asset = _try_ai_video(scene, run_id)
-        if asset is None and scene.scene_type in (SceneType.BROLL, SceneType.CHART, SceneType.MOTION_GRAPHIC):
+        # Stock is the fallback for EVERY scene type, not just the ones the planner pre-labelled
+        # BROLL. Restricting it to (BROLL, CHART, MOTION_GRAPHIC) meant an AI_VIDEO beat with no
+        # reachable generator, or an AI_IMAGE beat whose image-gen returned 402, dropped straight
+        # to the mascot while real footage for it sat one API call away. Measured on a live run:
+        # 8 beats, 1 labelled BROLL, so exactly 1 of 8 ever consulted Pexels and the other 7 became
+        # mascot shots. _try_stock is a no-op when a scene carries no search_keywords, so scenes
+        # the planner genuinely can't describe for a stock search still fall through cleanly.
+        if asset is None:
             asset = _try_stock(scene, run_id)
         if asset is None:
             asset = _try_character_animation(scene, run_id)
