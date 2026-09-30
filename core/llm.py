@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from core.logging import get_logger
 from core.settings import get_settings
+from tools import cost as cost_tool
 
 logger = get_logger("core.llm")
 
@@ -80,8 +81,19 @@ def call_structured(prompt: str, output_model: type[T], system: str | None = Non
         if llm is None:
             continue
         try:
-            structured_llm = llm.with_structured_output(output_model)
-            result = structured_llm.invoke(messages)
+            # include_raw=True so token usage survives. with_structured_output() otherwise returns
+            # only the parsed model and the AIMessage carrying usage_metadata is discarded, which is
+            # why per-run spend could never be measured. Falls back to the plain call if a provider
+            # does not support it -- losing the cost row is acceptable, losing the video is not.
+            try:
+                wrapped = llm.with_structured_output(output_model, include_raw=True)
+                envelope = wrapped.invoke(messages)
+                result = envelope["parsed"] if isinstance(envelope, dict) else envelope
+                _record_usage(provider_name, _model_name(llm), envelope)
+            except TypeError:
+                result = llm.with_structured_output(output_model).invoke(messages)
+            if result is None:
+                raise ValueError("structured output returned no parsed value")
             logger.info("llm.call.success", provider=provider_name, model=_model_name(llm))
             return result
         except Exception as exc:
@@ -92,6 +104,23 @@ def call_structured(prompt: str, output_model: type[T], system: str | None = Non
         "no usable LLM provider: set one of ANTHROPIC_API_KEY, OPENAI_API_KEY, GROQ_API_KEY "
         "(free: console.groq.com/keys), GOOGLE_API_KEY (free: aistudio.google.com/apikey)"
     ) from last_error
+
+
+def _record_usage(provider: str, model: str, envelope) -> None:
+    """Pulls usage_metadata off the raw AIMessage and hands it to tools.cost. Best-effort: a
+    provider that reports no usage simply records nothing."""
+    if not isinstance(envelope, dict):
+        return
+    raw = envelope.get("raw")
+    usage = getattr(raw, "usage_metadata", None) or {}
+    try:
+        cost_tool.record_llm(
+            provider, model,
+            int(usage.get("input_tokens") or 0),
+            int(usage.get("output_tokens") or 0),
+        )
+    except Exception as exc:  # cost accounting must never fail an LLM call
+        logger.warning("llm.usage_record_failed", provider=provider, error=str(exc))
 
 
 def _model_name(llm) -> str:

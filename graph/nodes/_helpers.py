@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from core.logging import get_logger
+from tools import cost as cost_tool
 
 logger = get_logger("graph")
 
@@ -18,6 +19,9 @@ def trace_event(stage: str, event: str, **fields: Any) -> dict:
 
 
 def log_and_trace(stage: str, event: str, **fields: Any) -> dict:
+    # Every node calls this on entry, which makes it the one place that can attribute spend to a
+    # stage without threading a collector through sixteen node signatures. See tools/cost.py.
+    cost_tool.set_stage(stage)
     logger.info(f"{stage}.{event}", **fields)
     return trace_event(stage, event, **fields)
 

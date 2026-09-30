@@ -12,14 +12,17 @@ from db.crud import (
     get_run,
     get_video_by_youtube_id,
     latest_strategy_weight_adjustments,
+    persist_costs,
     persist_performance_snapshot,
     persist_trace_as_agent_logs,
+    successful_upload_for_run,
     summarize_recent_performance,
     update_run_from_graph_result,
 )
 from graph.checkpointer import postgres_checkpointer
 from graph.feedback_graph import build_feedback_graph
 from graph.run import resume_run, start_run
+from tools import cost as cost_tool
 from worker.celery_app import celery_app
 
 configure_logging()
@@ -49,13 +52,28 @@ def run_pipeline_task(self, run_id: str) -> dict:
         if run is None:
             raise ValueError(f"Run {run_id} not found")
 
+        # The idempotency check UploadHistory exists for. A Celery redelivery of a run that already
+        # published must not republish: task_reject_on_worker_lost requeues on worker loss, and a
+        # failure anywhere after upload_node would otherwise replay it. The checkpointer resume in
+        # graph.run already avoids re-entering a completed node, so this is the second line of
+        # defence -- cheap (one indexed read) against the cost of a duplicate public video.
+        published = successful_upload_for_run(db, run.id)
+        if published is not None:
+            logger.warning(
+                "pipeline.task.already_published",
+                run_id=run_id,
+                youtube_video_id=published.youtube_video_id,
+                attempt=published.attempt_number,
+            )
+            return {"run_id": run_id, "status": str(run.status), "already_published": published.youtube_video_id}
+
         debug_force_reject = (run.stage_status or {}).get("debug_force_reject", {})
         past_performance_summary = summarize_recent_performance(db)
         strategy_weight_adjustments = latest_strategy_weight_adjustments(db)
         db.commit()  # release the read transaction — postgres_checkpointer() runs DDL (CREATE
         # INDEX CONCURRENTLY) on a separate connection that would otherwise block waiting on it
 
-        with postgres_checkpointer() as checkpointer:
+        with cost_tool.collecting(), postgres_checkpointer() as checkpointer:
             _thread_id, result = start_run(
                 checkpointer,
                 run_id=run.langgraph_thread_id,
@@ -63,10 +81,14 @@ def run_pipeline_task(self, run_id: str) -> dict:
                 past_performance_summary=past_performance_summary,
                 strategy_weight_adjustments=strategy_weight_adjustments,
             )
+            # Must be drained *inside* the scope: collecting() resets the ContextVar on exit, so
+            # reading it afterwards returns an empty list and every cost row is silently lost.
+            cost_entries = cost_tool.collected()
 
         interrupted = "__interrupt__" in result
         update_run_from_graph_result(db, run, result, interrupted=interrupted)
         persist_trace_as_agent_logs(db, run.id, result.get("trace", []))
+        persist_costs(db, run.id, cost_entries)
 
         logger.info("pipeline.task.complete", run_id=run_id, status=run.status, interrupted=interrupted)
         return {"run_id": run_id, "status": str(run.status), "interrupted": interrupted}

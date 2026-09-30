@@ -14,6 +14,7 @@ import httpx
 
 from core.logging import get_logger
 from core.settings import get_settings
+from tools import cost as cost_tool
 from tools.resilience import with_resilience
 
 logger = get_logger("tools.image_gen")
@@ -58,6 +59,7 @@ def _openai_call(prompt: str, output_path: str, size: str) -> str:
     with open(output_path, "wb") as f:
         f.write(raw)
 
+    cost_tool.record_image("openai")
     logger.info("image_gen.generate", provider="openai", prompt=prompt[:80], output_path=output_path)
     return output_path
 
@@ -75,6 +77,7 @@ def _pollinations_call(prompt: str, output_path: str, size: str) -> str:
     with open(output_path, "wb") as f:
         f.write(response.content)
 
+    cost_tool.record_image("pollinations")
     logger.info("image_gen.generate", provider="pollinations", prompt=prompt[:80], output_path=output_path)
     return output_path
 

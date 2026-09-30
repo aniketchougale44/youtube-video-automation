@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -54,8 +54,8 @@ class Run(Base):
     langgraph_thread_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()", onupdate="now()")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     videos: Mapped[list["Video"]] = relationship(back_populates="run", cascade="all, delete-orphan")
     agent_logs: Mapped[list["AgentLog"]] = relationship(back_populates="run", cascade="all, delete-orphan")
@@ -84,7 +84,7 @@ class Video(Base):
     visibility: Mapped[Visibility | None] = mapped_column(_str_enum(Visibility, "visibility"), nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     run: Mapped["Run"] = relationship(back_populates="videos")
     performance_snapshots: Mapped[list["PerformanceSnapshot"]] = relationship(
@@ -112,7 +112,7 @@ class AgentLog(Base):
 
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     run: Mapped["Run"] = relationship(back_populates="agent_logs")
 
@@ -132,7 +132,7 @@ class UploadHistory(Base):
     quota_units_used: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     run: Mapped["Run"] = relationship(back_populates="uploads")
 
@@ -152,7 +152,7 @@ class Cost(Base):
     total_usd: Mapped[float] = mapped_column(Float, default=0.0)
     cost_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     run: Mapped["Run"] = relationship(back_populates="costs")
 
@@ -174,7 +174,7 @@ class PerformanceSnapshot(Base):
     likes: Mapped[int] = mapped_column(Integer, default=0)
     comments: Mapped[int] = mapped_column(Integer, default=0)
 
-    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     video: Mapped["Video"] = relationship(back_populates="performance_snapshots")
 
@@ -190,7 +190,7 @@ class TranscriptEmbedding(Base):
     chunk_index: Mapped[int] = mapped_column(Integer, default=0)
     text_chunk: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ScriptEmbedding(Base):
@@ -210,4 +210,4 @@ class ScriptEmbedding(Base):
     chunk_index: Mapped[int] = mapped_column(Integer, default=0)
     text_chunk: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

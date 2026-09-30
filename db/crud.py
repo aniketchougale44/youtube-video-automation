@@ -4,11 +4,14 @@ PipelineState; SQLAlchemy rows are an outer concern owned by worker/tasks.py).""
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from agents.schemas.common import PipelineStage, RunStatus
-from db.models import AgentLog, PerformanceSnapshot, Run, Video
+from core.logging import get_logger
+from db.models import AgentLog, Cost, PerformanceSnapshot, Run, UploadHistory, Video
+
+logger = get_logger("db.crud")
 
 CRITIC_STAGE_PREFIXES = ("critic_",)
 
@@ -173,9 +176,75 @@ def update_run_from_graph_result(db: Session, run: Run, result: dict, interrupte
     db.refresh(run)
 
     if result.get("upload_result") or result.get("assembly_output"):
-        _upsert_video(db, run, result)
+        video = _upsert_video(db, run, result)
+        if result.get("upload_result"):
+            record_upload_attempt(db, run, video, result["upload_result"])
 
     return run
+
+
+def successful_upload_for_run(db: Session, run_id: uuid.UUID) -> UploadHistory | None:
+    """The ledger row proving this run already published, if it did.
+
+    This is what makes UploadHistory an idempotency ledger rather than an audit log: a caller can
+    ask "did this run already put a video on the channel?" before spending 1600 quota units finding
+    out. Graph nodes stay DB-free, so the check belongs to worker/tasks.py at the task boundary.
+    """
+    return db.execute(
+        select(UploadHistory)
+        .where(UploadHistory.run_id == run_id, UploadHistory.youtube_video_id.is_not(None))
+        .order_by(UploadHistory.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def record_upload_attempt(db: Session, run: Run, video: Video, upload_result: dict) -> UploadHistory | None:
+    """Appends one row per upload attempt -- successes, failures and quota deferrals alike.
+
+    The table and model have existed since the initial migration with nothing writing to them,
+    which was worse than merely missing: it reads 0 rows whether or not a video published, so it
+    silently invited exactly the wrong conclusion from anyone using it as evidence.
+
+    Re-running a completed run is a no-op rather than a duplicate row: the LangGraph checkpointer
+    replays a finished graph's terminal state on resume, so the same successful upload_result can
+    arrive here more than once without a second video ever being published.
+    """
+    youtube_video_id = upload_result.get("youtube_video_id")
+    if youtube_video_id:
+        already = db.execute(
+            select(UploadHistory).where(
+                UploadHistory.run_id == run.id,
+                UploadHistory.youtube_video_id == youtube_video_id,
+            )
+        ).scalar_one_or_none()
+        if already is not None:
+            return already
+
+    attempts = db.execute(
+        select(func.count()).select_from(UploadHistory).where(UploadHistory.run_id == run.id)
+    ).scalar() or 0
+
+    entry = UploadHistory(
+        id=uuid.uuid4(),
+        run_id=run.id,
+        video_id=video.id,
+        attempt_number=attempts + 1,
+        status=str(upload_result.get("status", "")),
+        youtube_video_id=youtube_video_id,
+        quota_units_used=int(upload_result.get("quota_units_used") or 0),
+        error=(upload_result.get("error") or None),
+    )
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+    logger.info(
+        "crud.upload_attempt_recorded",
+        run_id=str(run.id),
+        attempt=entry.attempt_number,
+        status=entry.status,
+        youtube_video_id=entry.youtube_video_id,
+    )
+    return entry
 
 
 def _upsert_video(db: Session, run: Run, result: dict) -> Video:
@@ -205,3 +274,38 @@ def _upsert_video(db: Session, run: Run, result: dict) -> Video:
     db.commit()
     db.refresh(video)
     return video
+
+
+def persist_costs(db: Session, run_id: uuid.UUID, entries: list[dict]) -> int:
+    """Writes tools.cost's collected entries into db.models.Cost. Returns the row count.
+
+    Unknown stage strings are dropped rather than raising: `stage` is a PipelineStage enum column,
+    and a cost recorded outside any node (a warm-up LLM call, a standalone script) has no valid
+    stage. Losing one such row is a better outcome than a ValueError taking down the task that just
+    finished producing a video.
+    """
+    valid = {p.value for p in PipelineStage}
+    written = 0
+    for e in entries:
+        stage = e.get("stage")
+        if stage not in valid:
+            logger.warning("crud.cost_unknown_stage", stage=stage, provider=e.get("provider"))
+            continue
+        db.add(
+            Cost(
+                id=uuid.uuid4(),
+                run_id=run_id,
+                stage=PipelineStage(stage),
+                provider=str(e.get("provider", ""))[:50],
+                unit_cost_usd=float(e.get("unit_cost_usd") or 0.0),
+                units=float(e.get("units") or 0.0),
+                total_usd=float(e.get("total_usd") or 0.0),
+                cost_metadata=e.get("metadata") or None,
+            )
+        )
+        written += 1
+    if written:
+        db.commit()
+    logger.info("crud.costs_persisted", run_id=str(run_id), rows=written,
+                total_usd=round(sum(float(e.get("total_usd") or 0) for e in entries), 6))
+    return written

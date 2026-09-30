@@ -10,6 +10,7 @@ import asyncio
 
 from core.logging import get_logger
 from core.settings import get_settings
+from tools import cost as cost_tool
 from tools.resilience import with_resilience
 
 logger = get_logger("tools.tts")
@@ -40,6 +41,7 @@ def _openai_call(text: str, output_path: str, voice: str) -> str:
     client = OpenAI(api_key=settings.openai_api_key)
     response = client.audio.speech.create(model=settings.openai_tts_model, voice=voice, input=text)
     response.write_to_file(output_path)
+    cost_tool.record_tts("openai", len(text))
     logger.info("tts.synthesize", provider="openai", chars=len(text), output_path=output_path, voice=voice)
     return output_path
 
@@ -58,5 +60,6 @@ def _edge_call(text: str, output_path: str, voice: str, rate: str = "+0%") -> st
         await edge_tts.Communicate(text, voice, rate=rate).save(output_path)
 
     asyncio.run(_run())
+    cost_tool.record_tts("edge", len(text))  # free, but the character count is still worth having
     logger.info("tts.synthesize", provider="edge", chars=len(text), output_path=output_path, voice=voice, rate=rate)
     return output_path
