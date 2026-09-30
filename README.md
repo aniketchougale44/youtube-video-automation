@@ -17,8 +17,15 @@ API and review dashboard, the Celery worker, and the APScheduler cron process. T
 covers the happy path, both critic retry loops, escalation, the human-approval interrupt/resume
 cycle, and the delayed feedback graph.
 
+It has been run end to end against a live channel: a scheduler firing triggered a Celery
+worker, which researched, scripted, sourced footage, rendered and published an unlisted video in
+about ten minutes with no human input. Every beat in that render used real stock footage, and the
+whole publish cost roughly **2,050 YouTube quota units** of the free 10,000/day — about four videos
+a day before the API, not the wallet, becomes the limit.
+
 Running it against your own channel takes two credentials only you can create — an LLM provider
-key and a YouTube OAuth token. See the [go-live checklist](#go-live-checklist).
+key and a YouTube OAuth token. See the [go-live checklist](#go-live-checklist), then
+[operating notes](#operating-notes) for the things that only show up on a real run.
 
 - **Trend Research Agent** (`graph/nodes/research.py::trend_research_node`) — pulls real YouTube
   "most popular" videos (`tools/youtube.py`, API-key auth), has an LLM cluster them into original
@@ -98,22 +105,38 @@ end-to-end without a credit card. Two things only an operator with their own acc
    you ran this script before the `yt-analytics.readonly` scope was added, re-run it — the old
    token won't cover analytics calls.
 
+   **Publish the OAuth consent screen, or this breaks weekly.** While the Google Cloud project's
+   consent screen is in *Testing*, refresh tokens expire after **7 days**, and the pipeline then
+   fails at upload with `RefreshError: invalid_grant` — which reads like a missing credential
+   rather than an expired one. Google Cloud Console -> APIs & Services -> OAuth consent screen ->
+   *Publish app*. The verification warning applies to apps with external users; you are the only
+   user of yours.
+
 Also needed either way: the **Docker daemon running** (or Postgres+pgvector/Redis reachable
 locally) before `docker compose up` / `alembic upgrade head`.
 
 **Free by default, everywhere else too** — no signup needed at all for these, they're already the
 default:
 - **Voiceover** (`TTS_PROVIDER=edge`) — edge-tts, Microsoft Edge's neural voices, keyless.
-- **Images/thumbnails** (`IMAGE_GEN_PROVIDER=pollinations`) — Pollinations.ai, keyless.
+- **Images/thumbnails** (`IMAGE_GEN_PROVIDER=pollinations`) — Pollinations.ai, keyless, but it
+  now answers `402 Payment Required` for anonymous use. Backdrops and thumbnail art therefore fail
+  and degrade (flat-colour backdrop, YouTube's auto-generated thumbnail frame). Real stock footage
+  via `PEXELS_API_KEY` has largely displaced this path; set `IMAGE_GEN_PROVIDER=openai` with a key
+  if you want generated imagery back.
 - **Background music** (`ENABLE_BACKGROUND_MUSIC=true`) — a synthesized ambient pad, keyless; set
   `FREESOUND_API_KEY` (free) to source real CC-licensed beds instead.
 - All three automatically fall back to their free path even if you set the paid/keyed provider but
   its key is missing or out of credits — see `tools/tts.py` / `tools/image_gen.py` /
   `tools/freesound_audio.py`.
 
-Optional, free, not blocking: `PEXELS_API_KEY` / `PIXABAY_API_KEY` (real stock footage/photos
-instead of always falling back to AI image-gen — both have free tiers, sign up for either),
-`TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID` / `SMTP_*` (Slack-only alerting works fine without them).
+**Strongly recommended, free, 5 minutes:** `PEXELS_API_KEY` (https://pexels.com/api). It is
+technically optional, but it decides what the video actually looks like. Without it — and with
+Pollinations now charging — every beat falls through to the animated mascot on a flat background,
+which is a slideshow rather than a video. With it, a measured run sourced real HD footage for 7 of
+7 beats. `PIXABAY_API_KEY` is a second source, tried only when Pexels returns nothing.
+
+Optional, not blocking: `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID` / `SMTP_*` (Slack-only alerting
+works fine without them), `FREESOUND_API_KEY` (a synthesized pad is used otherwise).
 
 ## Architecture
 
@@ -327,14 +350,59 @@ video; short-form videos are a fraction of this):
 
 Not included above: compute (rendering CPU time), Postgres/Redis hosting. At 3 videos/week (the
 default cadence) that's roughly **$7-8/month** in variable API spend on the paid path, or $0 on
-the free path. `db.models.Cost` is where actual per-run spend gets logged once each tool wrapper
-reports real provider costs, so this table can be replaced with measured numbers.
+the free path. `db.models.Cost` is where actual per-run spend would be logged, but nothing writes
+to it yet (see [Roadmap](#roadmap)), so the table above is an estimate rather than a measurement.
+
+### YouTube quota, which is measured
+
+Quota is the binding constraint on the free path, not money. Observed on a full publish:
+
+| Operation | Units | Notes |
+|---|---|---|
+| `search.list` x4 | 400 | one per `TREND_SEARCH_QUERIES` entry |
+| `videos.list` x~6 | 6 | hydrating search results with stats |
+| `videos.insert` | 1600 | the upload itself |
+| `playlists.list` + `playlistItems.insert` | 51 | |
+| **Total** | **~2,050** | of a 10,000/day default |
+
+So roughly **four publishes a day**, and a single upload is 16% of the daily budget. `tools/quota.py`
+is a Redis token bucket that refuses a call it cannot afford rather than overspending, and refunds
+a reservation when the call fails — a failed upload costs 0 units, not 1,600.
+
+## Operating notes
+
+Things that are not bugs but will surprise you, all learned from real runs:
+
+- **The worker caches settings at process start.** After editing `.env` — a new OAuth token, a new
+  API key — run `docker compose restart worker`, or it keeps using the old values.
+- **Custom thumbnails need a phone-verified channel.** Otherwise `thumbnails.set` returns 403 and
+  YouTube uses an auto-generated frame. The upload deliberately treats this as non-fatal: the video
+  is published, which is the part that matters.
+- **A workstation that sleeps misses scheduled runs.** Docker pauses the containers, and
+  APScheduler skips a firing it wakes up too late for. `PIPELINE_MISFIRE_GRACE_SECONDS` (default
+  6h) controls how late is still acceptable; an always-on host never reaches this.
+- **Caption burn-in needs a font the container actually has.** `tools/fonts.py` resolves one per
+  script and falls back to scanning the font directories. If it finds nothing, the render continues
+  *without subtitles* and only logs a warning, so check `has_captions` on the assembly output.
+- **Non-ASCII in logs.** LLM-written titles routinely contain characters like U+2011 (non-breaking
+  hyphen), and the pipeline produces Devanagari scripts. `core.logging.configure_logging()` forces
+  UTF-8 on stdout/stderr for this reason. Ad-hoc `python -c` one-liners bypass it — use
+  `PYTHONUTF8=1` for those.
+- **Google Trends rate-limits aggressively.** A 429 trips the circuit breaker after 5 failures and
+  scoring degrades to a view-count-derived proxy. This is intended: research continues rather than
+  failing the run.
 
 ## Roadmap
 
-- Per-run cost capture. The `db.models.Cost` table and the `agents.schemas.common.StageCost`
-  shape exist, but no stage reports into them yet, so the cost table above is estimated rather
-  than measured.
+- **Write the tables that exist but are never written.** `db.models.Cost` +
+  `agents.schemas.common.StageCost` (per-stage provider spend) and `db.models.UploadHistory`
+  (per-attempt upload outcome) are both declared in the models and the initial migration, and no
+  code inserts a row into either. `UploadHistory` is the more important of the two: it is where
+  upload attempts, failures and duplicate detection belong, and its emptiness is misleading —
+  it reads 0 rows whether or not a video published. Use the `videos` table
+  (`youtube_video_id`, `visibility`, `published_at`) to confirm a publish.
+- De-duplicate stock footage across beats. Two beats in a measured run were served the same Pexels
+  clip, which shows up as a repeated shot.
 - Apply `strategy_weight_adjustments` as a direct weighting on candidates' composite scores in
   code, rather than only as prompt text for the Strategy Agent to weigh.
 - Image-to-video for AI_VIDEO beats, so a character keeps a consistent look across a story
