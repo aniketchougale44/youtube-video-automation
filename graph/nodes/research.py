@@ -225,6 +225,56 @@ def _format_weight_adjustments(adjustments: dict[str, float]) -> str:
     )
 
 
+# How far a fully-saturated evergreen_bias (+/-0.2) may move a candidate's composite score. 1.0 on
+# a 0-10 scale is a deliberate nudge rather than a takeover: the learned signal comes from a single
+# video's retention against a small historical average, so it should break a near-tie between
+# candidates without overriding a clear winner on the objective signals.
+_LEARNED_WEIGHT_SCALE = 5.0
+
+
+def apply_learned_weights(
+    candidates: list[TopicCandidate], adjustments: dict[str, float]
+) -> list[TopicCandidate]:
+    """Re-scores and re-ranks candidates using the feedback loop's numeric adjustments.
+
+    These were previously only rendered into the Strategy Agent's prompt as text, which left the
+    whole learning loop depending on an LLM choosing to act on a sentence. Applying them in code
+    makes the signal move the ranking itself -- and therefore the deterministic fallback that takes
+    candidates[0] when the LLM's chosen title matches nothing.
+
+    evergreen_bias > 0 means recent evergreen content out-performed, so timeless candidates should
+    rise. freshness_score is the available proxy for that axis: 10 means the source videos published
+    today (trend-driven), 0 means they are old (evergreen). The bias is therefore applied against a
+    candidate's trend-leaning, and a mid-freshness candidate is left alone.
+
+    Returns copies, so the original objective scores stay auditable.
+    """
+    bias = float(adjustments.get("evergreen_bias") or 0.0)
+    if not bias:
+        return list(candidates)
+
+    reweighted = []
+    for candidate in candidates:
+        trend_leaning = (candidate.freshness_score - 5.0) / 5.0  # -1 evergreen .. +1 trending
+        delta = -bias * trend_leaning * _LEARNED_WEIGHT_SCALE
+        adjusted = candidate.model_copy(
+            update={"composite_score": round(max(0.0, min(10.0, candidate.composite_score + delta)), 2)}
+        )
+        reweighted.append(adjusted)
+        if abs(delta) >= 0.01:
+            logger.info(
+                "strategy.learned_weight_applied",
+                title=candidate.title[:60],
+                freshness=candidate.freshness_score,
+                delta=round(delta, 3),
+                composite_before=candidate.composite_score,
+                composite_after=adjusted.composite_score,
+            )
+
+    reweighted.sort(key=lambda c: c.composite_score, reverse=True)
+    return reweighted
+
+
 def strategy_node(state: PipelineState) -> dict:
     trace = log_and_trace(STAGE_STRATEGY, "start")
     settings = get_settings()
@@ -233,10 +283,14 @@ def strategy_node(state: PipelineState) -> dict:
     past_performance_summary = state.get("past_performance_summary") or "No prior performance data available yet."
     weight_adjustments = state.get("strategy_weight_adjustments") or {}
 
+    # Applied in code, not merely described in the prompt -- this also re-ranks, so the fallback
+    # below reflects the learning even when the LLM ignores the text.
+    candidates = apply_learned_weights(trend_output.candidates, weight_adjustments)
+
     candidates_listing = "\n".join(
         f"- \"{c.title}\" (search_volume={c.search_volume_score}, competition={c.competition_score}, "
         f"freshness={c.freshness_score}, composite={c.composite_score}): {c.description}"
-        for c in trend_output.candidates
+        for c in candidates
     )
     prompt = (
         f"Channel goals: {settings.channel_goals}\n\n"
@@ -246,10 +300,10 @@ def strategy_node(state: PipelineState) -> dict:
     )
     choice = call_structured(prompt, _StrategyChoice, system=_STRATEGY_SYSTEM_PROMPT)
 
-    selected = next((c for c in trend_output.candidates if c.title == choice.selected_topic_title), None)
+    selected = next((c for c in candidates if c.title == choice.selected_topic_title), None)
     if selected is None:
         logger.warning("strategy.llm_title_mismatch", chosen=choice.selected_topic_title)
-        selected = trend_output.candidates[0]
+        selected = candidates[0]  # highest composite *after* the learned re-weighting
 
     decision = StrategyDecision(
         selected_topic=selected,

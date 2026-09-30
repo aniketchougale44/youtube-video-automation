@@ -172,9 +172,26 @@ def _download(url: str, path: str) -> None:
             f.writelines(response.iter_bytes())
 
 
-def _try_stock(scene: SceneVisualPlan, run_id: str) -> SourcedAsset | None:
+def _pick_unused(hits: list[dict], used_urls: set[str], beat_index: int) -> dict:
+    """First hit this run hasn't already used, else the top hit.
+
+    Stock search is keyword-driven and neighbouring beats of one script describe related things, so
+    always taking hits[0] hands the same clip to several beats -- observed in a real render as the
+    identical file on beats 0 and 3, which reads as a glitch. Providers return several hits per
+    query, so a distinct one is usually one index away. Falling back to hits[0] when everything is
+    taken is deliberate: a repeated shot beats no footage at all.
+    """
+    for hit in hits:
+        if hit.get("url") not in used_urls:
+            return hit
+    logger.warning("asset_visual.stock_all_hits_already_used", beat_index=beat_index, hits=len(hits))
+    return hits[0]
+
+
+def _try_stock(scene: SceneVisualPlan, run_id: str, used_urls: set[str] | None = None) -> SourcedAsset | None:
     if not scene.search_keywords:
         return None
+    used_urls = used_urls if used_urls is not None else set()
     try:
         hits = stock_media_tool.search_videos(scene.search_keywords)
         asset_type = AssetType.STOCK_VIDEO
@@ -184,7 +201,8 @@ def _try_stock(scene: SceneVisualPlan, run_id: str) -> SourcedAsset | None:
         if not hits:
             return None
 
-        hit = hits[0]
+        hit = _pick_unused(hits, used_urls, scene.beat_index)
+        used_urls.add(hit.get("url"))
         ext = ".mp4" if asset_type == AssetType.STOCK_VIDEO else ".jpg"
         path = media_path(run_id, "assets", f"beat_{scene.beat_index}{ext}")
         _download(hit["url"], path)
@@ -309,6 +327,7 @@ def asset_visual_node(state: PipelineState) -> dict:
         ai_video_budget_indices = set(ai_video_indices[: settings.max_ai_video_beats_per_run])
 
     assets = []
+    used_stock_urls: set[str] = set()  # see _pick_unused: stops neighbouring beats sharing a clip
     for scene in plan.scenes:
         asset = None
         if scene.scene_type == SceneType.AI_VIDEO and scene.beat_index in ai_video_budget_indices:
@@ -321,7 +340,7 @@ def asset_visual_node(state: PipelineState) -> dict:
         # mascot shots. _try_stock is a no-op when a scene carries no search_keywords, so scenes
         # the planner genuinely can't describe for a stock search still fall through cleanly.
         if asset is None:
-            asset = _try_stock(scene, run_id)
+            asset = _try_stock(scene, run_id, used_stock_urls)
         if asset is None:
             asset = _try_character_animation(scene, run_id)
         if asset is None:
