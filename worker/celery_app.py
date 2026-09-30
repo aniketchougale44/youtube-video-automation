@@ -18,7 +18,22 @@ celery_app.conf.update(
     result_serializer="json",
     accept_content=["json"],
     task_track_started=True,
-    task_acks_late=True,          # redeliver if a worker dies mid-task instead of silently dropping it
+    task_acks_late=True,          # ack on completion, not on receipt
+    # task_acks_late alone does NOT survive a killed worker, despite what it sounds like. Celery
+    # acknowledges the message whenever the child process executing a task is terminated by a
+    # signal -- deliberately, to stop a task that segfaults the worker from being redelivered
+    # forever. So `acks_late` protects against a task *raising*, not against the worker *dying*.
+    #
+    # Verified here: the worker was SIGQUIT'd during asset_visual, six nodes in. Afterwards the
+    # broker db held only _kombu.binding.* keys -- no queued message, no `unacked` hash -- and the
+    # run sat at status='pending' forever with 8 checkpoints of finished work and nothing left to
+    # resume it. Exactly the silent drop this line used to claim it prevented.
+    #
+    # The tradeoff this accepts: a task that reliably kills its worker will now be redelivered
+    # rather than dropped. run_pipeline_task's own max_retries=3 does not bound that, since a
+    # worker-loss requeue is not a task retry. A genuinely poisonous run is the lesser problem --
+    # it is visible and fixable, whereas a dropped run is neither.
+    task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,  # don't hoard long-running render/upload tasks across workers
     result_expires=60 * 60 * 24 * 7,
     # Redis has no real per-message ack, so kombu fakes it with a visibility timeout: any task

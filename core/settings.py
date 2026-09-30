@@ -50,6 +50,15 @@ class Settings(BaseSettings):
     # channel_goals, trend_region_code); Sat added alongside Mon/Wed/Fri since kids' content
     # over-indexes on weekend viewership.
     pipeline_cron_schedule: str = "0 19 * * mon,wed,fri,sat"
+    # How late a missed pipeline firing may still run, in seconds. APScheduler skips a job whose
+    # scheduled time has passed by more than this, and on a workstation that sleeps the gap is
+    # easily overnight: observed in this project as
+    #   Run time of job "trigger_new_pipeline_run (next run at: 19:00 UTC)" was missed by 11:38:53
+    # -- the host slept through the window, Docker paused the containers, and the only scheduled
+    # run of the day was silently dropped. 6h is chosen because publishing a video some hours late
+    # is clearly better than not publishing it, while a slot missed by days should be abandoned
+    # rather than firing a stale trend-research run. On an always-on server this never triggers.
+    pipeline_misfire_grace_seconds: int = 21600
 
     # LLM (fallback order: anthropic -> openai -> groq -> gemini; each is skipped if its key is
     # unset, so a deployment can run on just the free tiers with no paid provider configured)

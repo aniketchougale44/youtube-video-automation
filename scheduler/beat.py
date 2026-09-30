@@ -30,7 +30,11 @@ def build_scheduler() -> BlockingScheduler:
         CronTrigger.from_crontab(settings.pipeline_cron_schedule),
         id="trigger_new_pipeline_run",
         replace_existing=True,
-        misfire_grace_time=3600,
+        # Configurable, and generous by default: a 1h grace meant a window missed while the host
+        # slept was dropped entirely. coalesce (APScheduler's default) collapses several missed
+        # firings into one, so a long outage produces a single catch-up run, not a burst.
+        misfire_grace_time=settings.pipeline_misfire_grace_seconds,
+        coalesce=True,
     )
     scheduler.add_job(
         check_performance_windows,
