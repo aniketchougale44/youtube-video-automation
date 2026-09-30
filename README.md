@@ -394,6 +394,11 @@ Things that are not bugs but will surprise you, all learned from real runs:
   every attempt and `worker/tasks.py` refuses to re-run a run that already published. Runs that
   published before that ledger existed have no row, so re-enqueuing one would publish again —
   backfill from the `videos` table (`youtube_video_id`) if you have old runs you might replay.
+- **The learned feedback signal is a nudge, not a veto.** `evergreen_bias` shifts a candidate's
+  composite score by at most 1.0 on a 0-10 scale, applied against its `freshness_score`, so it
+  breaks near-ties rather than overriding a clear winner on the objective signals. It derives from
+  one video's retention against a small historical average, which does not justify more authority
+  than that.
 - **Google Trends rate-limits aggressively.** A 429 trips the circuit breaker after 5 failures and
   scoring degrades to a view-count-derived proxy. This is intended: research continues rather than
   failing the run.
@@ -403,9 +408,6 @@ Things that are not bugs but will surprise you, all learned from real runs:
 - Charge the remaining providers into `Cost`. LLM tokens, TTS characters and image generations
   are recorded; YouTube quota units and render compute are not, so `total_usd` is a floor rather
   than the whole bill.
-- De-duplicate stock footage across beats. Two beats in a measured run were served the same Pexels
-  clip, which shows up as a repeated shot.
-- Apply `strategy_weight_adjustments` as a direct weighting on candidates' composite scores in
-  code, rather than only as prompt text for the Strategy Agent to weigh.
 - Image-to-video for AI_VIDEO beats, so a character keeps a consistent look across a story
-  (text-to-video has no memory between beats; `Wan2.2-TI2V-5B` supports both modes).
+  (text-to-video has no memory between beats; `Wan2.2-TI2V-5B` supports both modes, and needs a
+  Colab Pro GPU).
