@@ -15,12 +15,19 @@ circuit breaker.
 """
 from datetime import UTC, datetime, timedelta
 
+from google.auth.exceptions import RefreshError
+
 from core.logging import get_logger
 from core.settings import get_settings
 from tools import quota
 from tools.resilience import with_resilience
 
 logger = get_logger("tools.youtube")
+
+# An expired/revoked refresh token raises RefreshError('invalid_grant') identically on every
+# attempt, so retrying it only multiplies the quota charge -- 1600 units per videos.insert
+# attempt, for an upload that cannot happen until the operator re-runs the OAuth flow.
+NON_RETRYABLE_AUTH_ERRORS = (RefreshError,)
 
 
 class YouTubeNotConfiguredError(RuntimeError):
@@ -103,9 +110,8 @@ def most_popular(region_code: str = "US", category_id: str | None = None, max_re
 
 
 @with_resilience(provider="youtube_data_api")
+@quota.metered("videos.list")
 def _most_popular_call(youtube, region_code: str, category_id: str | None, max_results: int) -> list[dict]:
-    quota.consume("videos.list")
-
     request_kwargs = {
         "part": "snippet,statistics",
         "chart": "mostPopular",
@@ -150,16 +156,18 @@ def search_with_stats(query: str, max_results: int = 15) -> list[dict]:
 
 @with_resilience(provider="youtube_data_api")
 def _search_with_stats_call(youtube, query: str, max_results: int) -> list[dict]:
-    quota.consume("search.list")
-    search_response = (
-        youtube.search().list(part="snippet", q=query, type="video", maxResults=max_results).execute()
-    )
+    # Two billed calls, the second conditional -- reserved inline rather than with @quota.metered,
+    # which would charge videos.list even when the search came back empty.
+    with quota.reserve("search.list"):
+        search_response = (
+            youtube.search().list(part="snippet", q=query, type="video", maxResults=max_results).execute()
+        )
     video_ids = [item["id"]["videoId"] for item in search_response.get("items", [])]
     if not video_ids:
         return []
 
-    quota.consume("videos.list")
-    stats_response = youtube.videos().list(part="snippet,statistics", id=",".join(video_ids)).execute()
+    with quota.reserve("videos.list"):
+        stats_response = youtube.videos().list(part="snippet,statistics", id=",".join(video_ids)).execute()
 
     videos = [
         {
@@ -180,9 +188,8 @@ def _search_with_stats_call(youtube, query: str, max_results: int) -> list[dict]
 
 
 @with_resilience(provider="youtube_data_api")
+@quota.metered("search.list")
 def _search_call(youtube, query: str, max_results: int) -> list[dict]:
-    quota.consume("search.list")
-
     response = (
         youtube.search()
         .list(part="snippet", q=query, type="video", order="viewCount", maxResults=max_results)
@@ -274,11 +281,11 @@ def resumable_upload(file_path: str, metadata: dict, thumbnail_path: str | None 
     return video_id
 
 
-@with_resilience(provider="youtube_upload_api", max_attempts=3, cooldown_seconds=300)
+@with_resilience(never_retry=NON_RETRYABLE_AUTH_ERRORS, provider="youtube_upload_api", max_attempts=3, cooldown_seconds=300)
+@quota.metered("videos.insert")
 def _upload_video_call(youtube, file_path: str, metadata: dict, visibility: str) -> str:
     from googleapiclient.http import MediaFileUpload
 
-    quota.consume("videos.insert")
     body = {
         "snippet": {
             "title": metadata.get("title", "Untitled"),
@@ -300,10 +307,10 @@ def _upload_video_call(youtube, file_path: str, metadata: dict, visibility: str)
 
 
 @with_resilience(provider="youtube_thumbnail_api", max_attempts=2, cooldown_seconds=60)
+@quota.metered("thumbnails.set")
 def _set_thumbnail_call(youtube, video_id: str, thumbnail_path: str) -> None:
     from googleapiclient.http import MediaFileUpload
 
-    quota.consume("thumbnails.set")
     youtube.thumbnails().set(videoId=video_id, media_body=MediaFileUpload(thumbnail_path)).execute()
 
 
@@ -312,9 +319,9 @@ def set_visibility(video_id: str, visibility: str) -> None:
     _set_visibility_call(_oauth_client(), video_id, visibility)
 
 
-@with_resilience(provider="youtube_upload_api")
+@with_resilience(never_retry=NON_RETRYABLE_AUTH_ERRORS, provider="youtube_upload_api")
+@quota.metered("videos.update")
 def _set_visibility_call(youtube, video_id: str, visibility: str) -> None:
-    quota.consume("videos.update")
     youtube.videos().update(part="status", body={"id": video_id, "status": {"privacyStatus": visibility}}).execute()
     logger.info("youtube.visibility.updated", video_id=video_id, visibility=visibility)
 
@@ -327,20 +334,22 @@ def get_or_create_playlist(title: str, description: str = "", privacy_status: st
     return _get_or_create_playlist_call(_oauth_client(), title, description, privacy_status)
 
 
-@with_resilience(provider="youtube_playlist_api")
+@with_resilience(never_retry=NON_RETRYABLE_AUTH_ERRORS, provider="youtube_playlist_api")
 def _get_or_create_playlist_call(youtube, title: str, description: str, privacy_status: str) -> str:
-    quota.consume("playlists.list")
-    response = youtube.playlists().list(part="snippet", mine=True, maxResults=50).execute()
+    # playlists.insert is only reached when the playlist doesn't exist yet, which is every run
+    # after the first -- charging it up front over-bills 50 units per run for nothing.
+    with quota.reserve("playlists.list"):
+        response = youtube.playlists().list(part="snippet", mine=True, maxResults=50).execute()
     for item in response.get("items", []):
         if item["snippet"]["title"] == title:
             return item["id"]
 
-    quota.consume("playlists.insert")
     body = {
         "snippet": {"title": title, "description": description},
         "status": {"privacyStatus": privacy_status},
     }
-    response = youtube.playlists().insert(part="snippet,status", body=body).execute()
+    with quota.reserve("playlists.insert"):
+        response = youtube.playlists().insert(part="snippet,status", body=body).execute()
     playlist_id = response["id"]
     logger.info("youtube.playlist.created", playlist_id=playlist_id, title=title)
     return playlist_id
@@ -350,9 +359,9 @@ def add_video_to_playlist(playlist_id: str, video_id: str) -> None:
     _add_video_to_playlist_call(_oauth_client(), playlist_id, video_id)
 
 
-@with_resilience(provider="youtube_playlist_api")
+@with_resilience(never_retry=NON_RETRYABLE_AUTH_ERRORS, provider="youtube_playlist_api")
+@quota.metered("playlistItems.insert")
 def _add_video_to_playlist_call(youtube, playlist_id: str, video_id: str) -> None:
-    quota.consume("playlistItems.insert")
     body = {
         "snippet": {
             "playlistId": playlist_id,

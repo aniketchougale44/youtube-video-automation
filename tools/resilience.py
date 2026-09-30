@@ -8,7 +8,13 @@ from collections.abc import Callable
 from functools import wraps
 from typing import ParamSpec, TypeVar
 
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    retry_if_not_exception_type,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 from core.logging import get_logger
 
@@ -73,19 +79,32 @@ def with_resilience(
     provider: str,
     max_attempts: int = 3,
     retry_on: tuple[type[Exception], ...] = (Exception,),
+    never_retry: tuple[type[Exception], ...] = (),
     failure_threshold: int = 5,
     cooldown_seconds: float = 60.0,
 ):
     """Decorator: exponential-backoff retry (tenacity) wrapped in a per-provider circuit breaker.
-    On the circuit tripping, callers should catch CircuitOpenError and route to tools.notify."""
+    On the circuit tripping, callers should catch CircuitOpenError and route to tools.notify.
+
+    `never_retry` wins over `retry_on`, for failures that no amount of waiting can fix. The default
+    retry_on=(Exception,) will happily retry a permanent one: an expired OAuth refresh token raised
+    RefreshError('invalid_grant') on every attempt of a videos.insert, and since each attempt is
+    billed 1600 quota units that single dead token burned 4800 units in one node before Celery
+    redelivered the task and burned more. Retrying a credential problem cannot succeed; it can only
+    cost.
+    """
 
     breaker = get_circuit_breaker(provider, failure_threshold=failure_threshold, cooldown_seconds=cooldown_seconds)
 
     def decorator(fn: Callable[P, T]) -> Callable[P, T]:
+        should_retry = retry_if_exception_type(retry_on)
+        if never_retry:
+            should_retry = should_retry & retry_if_not_exception_type(never_retry)
+
         retrying = retry(
             stop=stop_after_attempt(max_attempts),
             wait=wait_exponential_jitter(initial=1, max=20),
-            retry=retry_if_exception_type(retry_on),
+            retry=should_retry,
             reraise=True,
         )(fn)
 
