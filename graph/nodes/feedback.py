@@ -9,6 +9,8 @@ the historical `baseline` (average views/retention across prior published videos
 and injects it into the graph's initial state, the same way run_pipeline_task injects
 past_performance_summary into the publish graph.
 """
+from datetime import datetime
+
 from agents.schemas.feedback import LearningUpdate, PerformanceSnapshot, PerformanceWindow
 from graph.nodes._helpers import log_and_trace
 from tools import youtube as youtube_tool
@@ -23,13 +25,25 @@ _VIEWS_RATIO_LOW = 0.5
 _VIEWS_RATIO_HIGH = 1.5
 
 
+def _published_at(state: dict) -> datetime | None:
+    """Parses the ISO publish timestamp the caller injected, if any. A missing or malformed value
+    falls back to a trailing window rather than failing the capture."""
+    raw = state.get("published_at")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+
+
 def performance_monitor_node(state: dict) -> dict:
     video_id = state.get("youtube_video_id", "")
     window = state.get("window", "24h")
     trace = log_and_trace(STAGE_PERF, "start", youtube_video_id=video_id, window=window)
 
     try:
-        report = youtube_tool.analytics_report(video_id, window)
+        report = youtube_tool.analytics_report(video_id, window, published_at=_published_at(state))
         snapshot = PerformanceSnapshot(
             youtube_video_id=video_id,
             window=PerformanceWindow(window),

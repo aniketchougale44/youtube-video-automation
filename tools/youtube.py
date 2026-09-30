@@ -209,7 +209,7 @@ def _search_call(youtube, query: str, max_results: int) -> list[dict]:
     return videos
 
 
-def analytics_report(video_id: str, window: str) -> dict:
+def analytics_report(video_id: str, window: str, published_at: datetime | None = None) -> dict:
     """Pulls views/likes/comments/avg-view-duration/retention for one video over the trailing
     `window` ("24h" -> last 1 day, "7d" -> last 7 days) ending today.
 
@@ -218,15 +218,28 @@ def analytics_report(video_id: str, window: str) -> dict:
     two fields always come back 0 — that's a real API limitation, not something left unfinished
     here.
     """
-    return _analytics_call(_analytics_client(), video_id, window)
+    return _analytics_call(_analytics_client(), video_id, window, published_at)
 
 
 @with_resilience(provider="youtube_analytics_api")
-def _analytics_call(analytics, video_id: str, window: str) -> dict:
+def _analytics_call(analytics, video_id: str, window: str, published_at: datetime | None = None) -> dict:
     settings = get_settings()
     days = 1 if window == "24h" else 7
-    end_date = datetime.now(UTC).date()
-    start_date = end_date - timedelta(days=days)
+    today = datetime.now(UTC).date()
+
+    if published_at is None:
+        # Trailing window ending today -- what a caller wants for an ad-hoc "how is this doing now?"
+        end_date = today
+        start_date = end_date - timedelta(days=days)
+    else:
+        # Anchored to the publish date, so a snapshot captured late still measures the window it
+        # claims to. A trailing window taken three days after publish reports the video's *fourth*
+        # day under the label "24h", which then gets compared against other videos' genuine first-day
+        # numbers by compute_performance_baseline -- apples to oranges, and invisible in the stored
+        # row. Anchoring is what makes catching up a missed window correct rather than merely
+        # possible, which is why scheduler/jobs.py no longer needs an upper bound at all.
+        start_date = published_at.date()
+        end_date = min(start_date + timedelta(days=days), today)  # the API rejects future dates
 
     response = (
         analytics.reports()

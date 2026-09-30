@@ -141,7 +141,14 @@ def performance_feedback_task(self, youtube_video_id: str, window: str) -> dict:
         baseline = compute_performance_baseline(db, exclude_video_id=video.id)
 
         app = build_feedback_graph().compile()
-        result = app.invoke({"youtube_video_id": youtube_video_id, "window": window, "baseline": baseline})
+        result = app.invoke({
+            "youtube_video_id": youtube_video_id,
+            "window": window,
+            "baseline": baseline,
+            # Anchors the analytics date range, so a snapshot captured late still measures the
+            # window it is labelled with. Graph nodes stay DB-free, so it is injected here.
+            "published_at": video.published_at.isoformat() if video.published_at else "",
+        })
 
         persist_performance_snapshot(db, video.id, result["performance_snapshot"])
         persist_trace_as_agent_logs(db, video.run_id, result.get("trace", []))

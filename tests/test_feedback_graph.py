@@ -8,7 +8,7 @@ from tools.youtube import YouTubeNotConfiguredError
 def test_performance_monitor_node_builds_snapshot_from_real_call(monkeypatch):
     monkeypatch.setattr(
         "graph.nodes.feedback.youtube_tool.analytics_report",
-        lambda video_id, window: {
+        lambda video_id, window, published_at=None: {
             "video_id": video_id, "window": window, "views": 1234, "impressions": 0, "ctr": 0.0,
             "avg_view_duration_seconds": 88.5, "retention_pct": 42.0, "likes": 50, "comments": 4,
         },

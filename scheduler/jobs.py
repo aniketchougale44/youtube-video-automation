@@ -11,11 +11,15 @@ from db.models import PerformanceSnapshot, Video
 
 logger = get_logger("scheduler.jobs")
 
-# (window label, lower bound, upper bound) — a video's age must fall in this range for its
-# snapshot to be due. Bounds are wide enough to tolerate the job's own polling interval.
+# (window, earliest age at which it may be captured). There is deliberately no upper bound: the
+# pair used to be (23h, 25h) and (6d23h, 7d1h), a 2-hour band checked hourly, so a host asleep
+# across that band lost the snapshot permanently -- the `already_captured` check only skips work,
+# it never backfills. Since tools.youtube.analytics_report anchors the date range to the publish
+# date, a late capture still measures the window it claims to, which makes catching up correct
+# rather than merely better than nothing.
 PERFORMANCE_WINDOWS = (
-    ("24h", timedelta(hours=23), timedelta(hours=25)),
-    ("7d", timedelta(days=6, hours=23), timedelta(days=7, hours=1)),
+    ("24h", timedelta(hours=23)),
+    ("7d", timedelta(days=6, hours=23)),
 )
 
 
@@ -64,9 +68,9 @@ def check_performance_windows() -> None:
 
         for video in videos:
             age = now - video.published_at
-            for window, lower, upper in PERFORMANCE_WINDOWS:
-                if not (lower <= age <= upper):
-                    continue
+            for window, earliest in PERFORMANCE_WINDOWS:
+                if age < earliest:
+                    continue  # too soon; a later run of this job will pick it up
                 already_captured = db.execute(
                     select(PerformanceSnapshot).where(
                         PerformanceSnapshot.video_id == video.id, PerformanceSnapshot.window == window
@@ -75,6 +79,12 @@ def check_performance_windows() -> None:
                 if already_captured:
                     continue
                 performance_feedback_task.delay(video.youtube_video_id, window)
-                logger.info("scheduler.triggered_performance_check", video_id=str(video.id), window=window)
+                logger.info(
+                    "scheduler.triggered_performance_check",
+                    video_id=str(video.id),
+                    window=window,
+                    age_hours=round(age.total_seconds() / 3600, 1),
+                    late=age > earliest + timedelta(hours=2),
+                )
     finally:
         db.close()

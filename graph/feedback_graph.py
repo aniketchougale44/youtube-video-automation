@@ -13,6 +13,7 @@ from graph.nodes.feedback import learning_node, performance_monitor_node
 class FeedbackState(TypedDict, total=False):
     youtube_video_id: str
     window: str  # "24h" | "7d"
+    published_at: str  # ISO; anchors the analytics window so a late capture is still correct
 
     # --- injected by the caller (worker/tasks.py) before invoking the graph, from Postgres ---
     baseline: dict  # {"sample_size", "avg_views", "avg_retention_pct"} across prior published videos
