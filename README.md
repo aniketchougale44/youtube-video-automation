@@ -350,8 +350,10 @@ video; short-form videos are a fraction of this):
 
 Not included above: compute (rendering CPU time), Postgres/Redis hosting. At 3 videos/week (the
 default cadence) that's roughly **$7-8/month** in variable API spend on the paid path, or $0 on
-the free path. `db.models.Cost` is where actual per-run spend would be logged, but nothing writes
-to it yet (see [Roadmap](#roadmap)), so the table above is an estimate rather than a measurement.
+the free path. The table above is a list-price estimate; `db.models.Cost` now holds the measured
+per-stage spend for every run (LLM tokens priced input/output separately, TTS characters, image
+generations), so `select stage, provider, sum(total_usd) from costs where run_id = ...` gives the
+real figure for a given video.
 
 ### YouTube quota, which is measured
 
@@ -388,19 +390,19 @@ Things that are not bugs but will surprise you, all learned from real runs:
   hyphen), and the pipeline produces Devanagari scripts. `core.logging.configure_logging()` forces
   UTF-8 on stdout/stderr for this reason. Ad-hoc `python -c` one-liners bypass it — use
   `PYTHONUTF8=1` for those.
+- **The double-publish guard only covers runs that have a ledger row.** `upload_history` records
+  every attempt and `worker/tasks.py` refuses to re-run a run that already published. Runs that
+  published before that ledger existed have no row, so re-enqueuing one would publish again —
+  backfill from the `videos` table (`youtube_video_id`) if you have old runs you might replay.
 - **Google Trends rate-limits aggressively.** A 429 trips the circuit breaker after 5 failures and
   scoring degrades to a view-count-derived proxy. This is intended: research continues rather than
   failing the run.
 
 ## Roadmap
 
-- **Write the tables that exist but are never written.** `db.models.Cost` +
-  `agents.schemas.common.StageCost` (per-stage provider spend) and `db.models.UploadHistory`
-  (per-attempt upload outcome) are both declared in the models and the initial migration, and no
-  code inserts a row into either. `UploadHistory` is the more important of the two: it is where
-  upload attempts, failures and duplicate detection belong, and its emptiness is misleading —
-  it reads 0 rows whether or not a video published. Use the `videos` table
-  (`youtube_video_id`, `visibility`, `published_at`) to confirm a publish.
+- Charge the remaining providers into `Cost`. LLM tokens, TTS characters and image generations
+  are recorded; YouTube quota units and render compute are not, so `total_usd` is a floor rather
+  than the whole bill.
 - De-duplicate stock footage across beats. Two beats in a measured run were served the same Pexels
   clip, which shows up as a repeated shot.
 - Apply `strategy_weight_adjustments` as a direct weighting on candidates' composite scores in
