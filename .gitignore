@@ -18,3 +18,4 @@ downloads/
 docker/data/
 docker-compose.override.yml
 .claude/
+backups/
