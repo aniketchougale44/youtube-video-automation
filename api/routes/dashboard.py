@@ -14,18 +14,23 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from agents.schemas.common import RunStatus
+from core.logging import get_logger
 from core.settings import get_settings
 from db.base import SessionLocal, get_db
 from db.crud import get_run, list_runs
 from db.models import AgentLog, Cost, Run, Video
 from graph.checkpointer import postgres_checkpointer
 from graph.run import get_state
-from tools.cache import cache_scan_json
+from tools import youtube as youtube_tool
+from tools.cache import cache_get_json, cache_scan_json, cache_set_json
 from tools.script_progress import KEY_PREFIX as SCRIPT_RUN_KEY_PREFIX
 from worker.tasks import resume_pipeline_task
 
 router = APIRouter()
 templates = Jinja2Templates(directory="api/templates")
+
+logger = get_logger("api.dashboard")
+_CHANNEL_CACHE_KEY = "dashboard:channel_uploads"
 
 # Mirrors the node order wired in graph/builder.py — used only to place a run's live position on
 # the progress bar, not to drive any control flow.
@@ -341,6 +346,28 @@ def studio(request: Request):
     """The chat-led control surface. Renders empty and fills itself from /dashboard/snapshot, so a
     slow database never blocks first paint."""
     return templates.TemplateResponse(request, "studio.html", {})
+
+
+@router.get("/channel")
+def dashboard_channel():
+    """The channel's real uploads, for the studio's Published panel.
+
+    Not read from the `videos` table: that only records what the pipeline published, so one-off
+    scripts/produce_*.py uploads are invisible to it -- 8 of 12 videos on this channel at the time
+    this was added. Cached for 5 minutes because the studio polls every 5 seconds and this costs 2
+    quota units per call; the list changes at most a few times a day.
+    """
+    cached = cache_get_json(_CHANNEL_CACHE_KEY)
+    if cached is not None:
+        return cached
+    try:
+        videos = youtube_tool.list_channel_uploads()
+    except Exception as exc:
+        logger.warning("dashboard.channel_uploads_failed", error=str(exc))
+        return {"videos": [], "error": type(exc).__name__}
+    payload = {"videos": videos}
+    cache_set_json(_CHANNEL_CACHE_KEY, payload, ttl_seconds=300)
+    return payload
 
 
 @router.get("/snapshot")

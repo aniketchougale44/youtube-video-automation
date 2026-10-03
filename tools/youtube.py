@@ -383,3 +383,45 @@ def _add_video_to_playlist_call(youtube, playlist_id: str, video_id: str) -> Non
     }
     youtube.playlistItems().insert(part="snippet", body=body).execute()
     logger.info("youtube.playlist.video_added", playlist_id=playlist_id, video_id=video_id)
+
+
+def list_channel_uploads(max_results: int = 12) -> list[dict]:
+    """The channel's actual uploads, newest first.
+
+    The `videos` table only records what the LangGraph pipeline published. The standalone
+    scripts/produce_*.py one-offs call resumable_upload directly and write no row, so a dashboard
+    reading Postgres alone shows a strict subset of the channel -- 8 of 12 when this was added. For
+    "what is on my channel", YouTube is the source of truth, so ask it.
+
+    Costs 2 quota units (channels.list + playlistItems.list), which is why callers cache it.
+    """
+    client = _oauth_client()
+    with quota.reserve("channels.list"):
+        channel = client.channels().list(part="contentDetails", mine=True).execute()
+    items = channel.get("items") or []
+    if not items:
+        return []
+    uploads_playlist = items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
+
+    with quota.reserve("playlistItems.list"):
+        response = (
+            client.playlistItems()
+            .list(part="snippet,contentDetails", playlistId=uploads_playlist, maxResults=max_results)
+            .execute()
+        )
+
+    videos = []
+    for item in response.get("items", []):
+        snippet = item.get("snippet", {})
+        thumbs = snippet.get("thumbnails") or {}
+        best = thumbs.get("medium") or thumbs.get("default") or {}
+        videos.append(
+            {
+                "youtube_video_id": item["contentDetails"]["videoId"],
+                "title": snippet.get("title", ""),
+                "published_at": item["contentDetails"].get("videoPublishedAt"),
+                "thumbnail_url": best.get("url"),
+            }
+        )
+    logger.info("youtube.channel_uploads", count=len(videos))
+    return videos

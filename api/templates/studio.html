@@ -250,20 +250,46 @@ async function refresh(){
       $('#live').innerHTML='<p class="empty">Nothing running. Name a topic or paste a story to start one.</p>';
     }
 
-    const pub=runs.filter(x=>x.youtube_url).slice(0,4);
-    $('#published').innerHTML = pub.length ? pub.map(v=>`
-      <a class="vid" href="${esc(v.youtube_url)}" target="_blank" rel="noopener">
-        ${v.thumbnail_url?`<img src="${esc(v.thumbnail_url)}" alt="">`:'<img alt="">'}
-        <div><b>${esc(v.topic)}</b><small>${esc(v.status)} · $${(v.cost_usd||0).toFixed(2)}</small></div>
-      </a>`).join('') : '<p class="empty">Nothing published yet.</p>';
+    // Per-run spend, so a channel video the pipeline produced can still show what it cost.
+    costByVideo = {};
+    runs.forEach(r=>{ if(r.youtube_url) costByVideo[r.youtube_url.slice(-11)] = r.cost_usd||0; });
   }catch(e){
     $('#pills').innerHTML=pill('api unreachable','bad');
   }
 }
 function esc(t){ return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
+// The Published panel reads the channel, not the `videos` table. That table only records what the
+// pipeline published, so uploads from the standalone scripts/produce_*.py one-offs never appear in
+// it -- 8 of 12 videos on this channel. Server-side cached for 5 minutes, so this polling loop
+// costs nothing per tick.
+let costByVideo = {};
+async function refreshChannel(){
+  try{
+    const r=await fetch('/dashboard/channel'); if(!r.ok) throw new Error('HTTP '+r.status);
+    const d=await r.json(), vids=d.videos||[];
+    if(!vids.length){
+      $('#published').innerHTML = d.error
+        ? `<p class="empty">Couldn't reach YouTube (${esc(d.error)}).</p>`
+        : '<p class="empty">Nothing published yet.</p>';
+      return;
+    }
+    $('#published').innerHTML = vids.slice(0,6).map(v=>{
+      const cost=costByVideo[v.youtube_video_id];
+      const when=v.published_at?new Date(v.published_at).toLocaleDateString(undefined,{day:'numeric',month:'short'}):'';
+      return `<a class="vid" href="https://youtube.com/watch?v=${esc(v.youtube_video_id)}" target="_blank" rel="noopener">
+        ${v.thumbnail_url?`<img src="${esc(v.thumbnail_url)}" alt="">`:'<img alt="">'}
+        <div><b>${esc(v.title)}</b><small>${esc(when)}${cost!=null?` · $${cost.toFixed(2)}`:''}</small></div>
+      </a>`;
+    }).join('');
+  }catch(e){
+    $('#published').innerHTML=`<p class="empty">Couldn't load channel videos — ${esc(e.message)}</p>`;
+  }
+}
+
 bubble("I'm wired into the pipeline. Ask **what's happening right now**, name a topic to make a video about, paste a story to turn into a video, or ask for **ideas**.",'ai');
 refresh(); setInterval(refresh, 5000);
+refreshChannel(); setInterval(refreshChannel, 60000);  // server-cached 5min; this just picks it up
 </script>
 </body>
 </html>

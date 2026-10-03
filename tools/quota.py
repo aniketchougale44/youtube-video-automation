@@ -22,6 +22,7 @@ UNIT_COSTS: dict[str, int] = {
     "videos.update": 50,
     "thumbnails.set": 50,
     "playlists.list": 1,
+    "playlistItems.list": 1,
     "playlists.insert": 50,
     "playlistItems.insert": 50,
 }
