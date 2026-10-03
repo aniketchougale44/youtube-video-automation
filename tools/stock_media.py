@@ -55,11 +55,39 @@ def _pexels_video_search(query: str, per_page: int) -> list[dict]:
     videos = response.json().get("videos", [])
     results = []
     for video in videos:
-        files = video.get("video_files", [])
-        best = next((f for f in files if f.get("quality") == "hd"), files[0] if files else None)
+        best = _pick_rendition(video.get("video_files", []))
         if best:
             results.append({"id": str(video["id"]), "url": best["link"], "source": "pexels", "license": "pexels-license"})
     return results
+
+
+def _pick_rendition(files: list[dict]) -> dict | None:
+    """The smallest landscape rendition that fills a 1920x1080 frame without upscaling.
+
+    Selecting on `quality == "hd"` was wrong twice over. Pexels labels 1280x720 "hd", so beats were
+    upscaled to 1080p and came out soft. Worse, it ignores orientation: a 1080x1920 portrait clip
+    scored "hd" too, and _resize_to_cover then scales it to 1920x3413 and crops a narrow horizontal
+    band out of the middle -- the subject is usually not in that band, so the shot is destroyed. Two
+    of seven beats in a real render were portrait clips mangled this way.
+
+    So: landscape only, at least 1920x1080, and of those the smallest, since anything larger is
+    bytes downloaded and pixels decoded that the 1080p output throws away. Falling back to the
+    widest landscape rendition, then to anything at all, keeps a beat sourced rather than dropping
+    it to the mascot when a clip simply has no large landscape version.
+    """
+    sized = [f for f in files if f.get("link") and f.get("width") and f.get("height")]
+    if not sized:
+        return files[0] if files else None
+
+    landscape = [f for f in sized if f["width"] > f["height"]]
+    if not landscape:
+        logger.info("stock_media.no_landscape_rendition", renditions=len(sized))
+        return max(sized, key=lambda f: f["width"])
+
+    covering = [f for f in landscape if f["width"] >= 1920 and f["height"] >= 1080]
+    if covering:
+        return min(covering, key=lambda f: f["width"] * f["height"])
+    return max(landscape, key=lambda f: f["width"] * f["height"])
 
 
 @with_resilience(provider="pexels")

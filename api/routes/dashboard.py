@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from agents.schemas.common import RunStatus
-from core.logging import get_logger
+from core.logging import code_version, get_logger
 from core.settings import get_settings
 from db.base import SessionLocal, get_db
 from db.crud import get_run, list_runs
@@ -218,6 +218,16 @@ def _script_runs() -> list[dict]:
     return rows
 
 
+def _worker_version() -> str | None:
+    """Whatever commit the worker announced when it booted; None if it has not, or Redis is down."""
+    try:
+        from tools.cache import _redis
+
+        return _redis().get("worker:code_version")
+    except Exception:
+        return None
+
+
 def _build_snapshot(db: Session) -> dict:
     runs = list_runs(db, limit=50)
     total_stages = len(PIPELINE_NODE_ORDER)
@@ -292,6 +302,10 @@ def _build_snapshot(db: Session) -> dict:
 
     return {
         "generated_at": now.isoformat(),
+        # So a stale worker is visible rather than merely logged. The source is bind-mounted, so a
+        # worker can run code several commits behind the files on disk -- which silently cost this
+        # project a feature (a queued user_topic the running worker had no code to read).
+        "versions": {"api": code_version(), "worker": _worker_version()},
         "stats": {
             "total": sum(status_counts.values()),
             "pending": status_counts.get(RunStatus.PENDING, 0),

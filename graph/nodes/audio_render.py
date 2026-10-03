@@ -379,7 +379,20 @@ def video_assembly_node(state: PipelineState) -> dict:
     total_duration = video.duration
     render_path = media_path(run_id, "render", "final.mp4")
     try:
-        video.write_videofile(render_path, fps=TARGET_FPS, codec="libx264", audio_codec="aac", logger=None)
+        # threads + preset, because the default is one thread at preset "medium" and this is by far
+        # the longest stage in the pipeline -- a 91s render took over 20 minutes while every other
+        # stage put together took ~100 seconds. "veryfast" trades a modestly larger file for a large
+        # drop in encode time, which is the right way round for a 1080p upload that YouTube will
+        # re-encode anyway.
+        video.write_videofile(
+            render_path,
+            fps=TARGET_FPS,
+            codec="libx264",
+            audio_codec="aac",
+            threads=os.cpu_count() or 2,
+            preset="veryfast",
+            logger=None,
+        )
     finally:
         full_audio.close()
         if music_clip is not None:

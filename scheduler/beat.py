@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from core.logging import configure_logging, get_logger
+from core.logging import code_version, configure_logging, get_logger
 from core.settings import get_settings
 from scheduler.jobs import (
     check_performance_windows,
@@ -59,7 +59,7 @@ def build_scheduler() -> BlockingScheduler:
 def main() -> None:
     settings = get_settings()
     scheduler = build_scheduler()
-    logger.info("scheduler.starting", pipeline_cron=settings.pipeline_cron_schedule, jobs=[j.id for j in scheduler.get_jobs()])
+    logger.info("scheduler.starting", code_version=code_version(), pipeline_cron=settings.pipeline_cron_schedule, jobs=[j.id for j in scheduler.get_jobs()])
     scheduler.start()
 
 

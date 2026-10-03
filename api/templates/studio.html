@@ -225,6 +225,12 @@ input.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preven
 input.addEventListener('input',()=>{ input.style.height='auto'; input.style.height=Math.min(input.scrollHeight,230)+'px'; });
 
 // ---------- status panes, polled from the existing dashboard snapshot ----------
+// A worker that booted before the latest commit runs code the files on disk no longer match,
+// which looks like a feature silently not working rather than like a deploy problem.
+function staleWorkerPill(v){
+  if(!v || !v.worker || !v.api || v.worker==='unknown' || v.api==='unknown') return '';
+  return v.worker===v.api ? '' : pill(`worker stale @${v.worker} (code ${v.api}) — restart it`,'bad');
+}
 function pill(label,cls){ return `<span class="pill"><i class="dot ${cls||''}"></i>${label}</span>`; }
 
 async function refresh(){
@@ -237,7 +243,8 @@ async function refresh(){
       pill(active?`${active.status.replace('_',' ')}`:'idle', active?'live':'') +
       pill(`${st.published||0} published`) +
       pill(`$${(st.cost_total_usd||0).toFixed(2)} spend`) +
-      pill(`${st.needs_attention||0} need attention`, (st.needs_attention||0)>0?'warn':'');
+      pill(`${st.needs_attention||0} need attention`, (st.needs_attention||0)>0?'warn':'') +
+      staleWorkerPill(s.versions);
 
     if(active){
       const pct=active.progress_total?Math.round(100*active.progress/active.progress_total):0;

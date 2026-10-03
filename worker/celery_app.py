@@ -2,6 +2,7 @@
 (the `worker` service in docker-compose.yml does exactly this)."""
 from celery import Celery
 
+from core.logging import code_version, get_logger
 from core.settings import get_settings
 
 settings = get_settings()
@@ -45,3 +46,20 @@ celery_app.conf.update(
     # anyway (its endpoint is gone) and redelivery would just repeat a doomed render.
     broker_transport_options={"visibility_timeout": 60 * 60 * 12},
 )
+
+
+# Announce which commit this process actually imported, and publish it where the dashboard can read
+# it. A bind-mounted source directory means the files on disk can be several commits ahead of the
+# running interpreter, and nothing about the container's state hints at that.
+_logger = get_logger("worker.celery_app")
+WORKER_VERSION = code_version()
+_logger.info("worker.starting", code_version=WORKER_VERSION)
+
+try:
+    import redis as _redis
+
+    _redis.Redis.from_url(settings.redis_url, decode_responses=True, protocol=2).set(
+        "worker:code_version", WORKER_VERSION
+    )
+except Exception as _exc:  # Redis down must never stop the worker booting
+    _logger.warning("worker.version_publish_failed", error=str(_exc))

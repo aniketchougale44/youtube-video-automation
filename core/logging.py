@@ -59,3 +59,43 @@ def configure_logging() -> None:
 
 def get_logger(name: str) -> structlog.BoundLogger:
     return structlog.get_logger(name)
+
+
+def code_version() -> str:
+    """A fingerprint of the Python source this process would import, as "<git sha>+<hash>" or just
+    the hash.
+
+    Answers one question: is the code a running process loaded still the code on disk? The
+    containers bind-mount the source, so editing a file changes the disk and not the already-running
+    interpreter, and nothing about the container's state hints at the difference. That cost this
+    project a feature -- a run was queued carrying a user_topic the running worker had no code to
+    read, so it silently did the full trend research the feature exists to skip.
+
+    Hashing the tree rather than asking git, because .git is not mounted into the containers (git
+    there returns "unknown", which is exactly as useless as no check at all) and because the mounted
+    files, not the commit, are what actually gets imported. Size and mtime rather than contents: it
+    is ~10x cheaper on a few hundred files and cannot miss an edit, since writing a file changes
+    both.
+    """
+    import hashlib
+    import os
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    packages = ("agents", "api", "core", "db", "graph", "scheduler", "tools", "worker")
+
+    digest = hashlib.sha256()
+    for package in packages:
+        base = os.path.join(root, package)
+        if not os.path.isdir(base):
+            continue
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+            for name in sorted(f for f in filenames if f.endswith(".py")):
+                path = os.path.join(dirpath, name)
+                try:
+                    stat = os.stat(path)
+                except OSError:
+                    continue
+                digest.update(os.path.relpath(path, root).replace(os.sep, "/").encode())
+                digest.update(f"{stat.st_size}:{int(stat.st_mtime)}".encode())
+    return digest.hexdigest()[:12]
