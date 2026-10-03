@@ -158,9 +158,38 @@ def _synthesize_topic_candidates(raw_videos: list[dict], max_candidates: int) ->
     return candidates
 
 
+def _operator_topic_candidate(topic: str) -> TopicCandidate:
+    """A single candidate standing in for a topic the operator named.
+
+    Scores are mid-range rather than maxed: they feed composite_score and the learned re-weighting,
+    and inventing a 10 would distort any comparison this candidate later appears in. It is the only
+    candidate anyway -- strategy_node has nothing to rank it against.
+    """
+    return TopicCandidate(
+        title=topic,
+        description=f"Operator-requested topic: {topic}",
+        category="operator",
+        search_volume_score=5.0,
+        competition_score=5.0,
+        freshness_score=5.0,
+        composite_score=5.0,
+        source_video_ids=[],
+    )
+
+
 def trend_research_node(state: PipelineState) -> dict:
     trace = log_and_trace(STAGE_TREND, "start")
     settings = get_settings()
+
+    # Short-circuit when the operator named a topic. Discovering trends nobody asked about would
+    # cost ~400 quota units (4 x search.list) and be thrown away by strategy_node regardless.
+    user_topic = (state.get("user_topic") or "").strip()
+    if user_topic:
+        output = TrendResearchOutput(candidates=[_operator_topic_candidate(user_topic)])
+        return {
+            "trend_output": output.model_dump(mode="json"),
+            "trace": [trace, log_and_trace(STAGE_TREND, "complete", source="operator", topic=user_topic[:80])],
+        }
 
     category_ids = [c.strip() for c in settings.trend_category_ids.split(",") if c.strip()] or [None]
 

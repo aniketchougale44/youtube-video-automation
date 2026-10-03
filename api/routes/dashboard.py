@@ -336,6 +336,27 @@ def dashboard_stream():
     )
 
 
+@router.get("/studio")
+def studio(request: Request):
+    """The chat-led control surface. Renders empty and fills itself from /dashboard/snapshot, so a
+    slow database never blocks first paint."""
+    return templates.TemplateResponse(request, "studio.html", {})
+
+
+@router.get("/snapshot")
+def dashboard_snapshot(db: Session = Depends(get_db)):
+    """The same payload /stream pushes, as a plain GET.
+
+    The studio polls this instead of holding an SSE connection: its panes update every few seconds,
+    and a long-lived stream per open tab is a poor trade for that. Both read _build_snapshot, so the
+    two surfaces can never disagree about run state.
+    """
+    return _build_snapshot(db)
+
+
+# Registered after the literal paths above on purpose: run_id is typed uuid.UUID, so a request for
+# /dashboard/studio would match this route's shape and fail validation with a 422 rather than
+# falling through to it.
 @router.get("/{run_id}")
 def dashboard_review(request: Request, run_id: uuid.UUID, db: Session = Depends(get_db)):
     run = get_run(db, run_id)

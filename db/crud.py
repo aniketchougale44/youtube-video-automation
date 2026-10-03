@@ -16,12 +16,26 @@ logger = get_logger("db.crud")
 CRITIC_STAGE_PREFIXES = ("critic_",)
 
 
-def create_run(db: Session, debug_force_reject: dict | None = None) -> Run:
+def create_run(
+    db: Session,
+    debug_force_reject: dict | None = None,
+    user_topic: str | None = None,
+    user_script: str | None = None,
+) -> Run:
+    """Creates the Run row a Celery task will pick up.
+
+    Operator intent rides in stage_status rather than new columns, deliberately: it keeps this
+    free of a migration, and the graph already receives it as initial state rather than reading
+    the DB. worker/tasks.py lifts it back out when it invokes the graph.
+    """
     run = Run(
         id=uuid.uuid4(),
         status=RunStatus.PENDING,
         langgraph_thread_id=str(uuid.uuid4()),
-        stage_status={"debug_force_reject": debug_force_reject or {}},
+        stage_status={
+            "debug_force_reject": debug_force_reject or {},
+            "user_inputs": {"topic": user_topic or "", "script": user_script or ""},
+        },
     )
     db.add(run)
     db.commit()

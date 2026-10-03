@@ -62,6 +62,18 @@ class _ScriptDraft(BaseModel):
     cta: str
 
 
+_STORY_SEGMENTATION_SYSTEM_PROMPT = (
+    "You are segmenting a story the operator wrote into video beats. This is NOT a rewrite. "
+    "Preserve their wording verbatim wherever you can: split the text at natural narrative "
+    "boundaries and assign each span to one beat's voiceover_text, in order, using their original "
+    "sentences. You may fix obvious typos, and add a short hook or closing line ONLY if the story "
+    "clearly lacks one. Do not add facts, characters, jokes or morals that are not in the text, and "
+    "do not paraphrase to sound more like marketing copy -- the operator chose these words. Give "
+    "every beat a visual_cue describing what should be shown on screen, since the pipeline sources "
+    "real footage from it. Label the first beat hook, a closing call to action cta, and the rest "
+    "story."
+)
+
 _SCRIPT_WRITER_SYSTEM_PROMPT = (
     "You are a YouTube scriptwriter. Write a complete, narratively ordered script (hook first, cta "
     "last) for the given topic and format. Write natural spoken narration, not essay prose — short "
@@ -89,7 +101,23 @@ def script_writer_node(state: PipelineState) -> dict:
     if feedback:
         prompt = f"Revise the previous draft to address this critic feedback: {feedback}\n\n{prompt}"
 
-    draft = call_structured(prompt, _ScriptDraft, system=_SCRIPT_WRITER_SYSTEM_PROMPT)
+    user_script = (state.get("user_script") or "").strip()
+    if user_script:
+        # The operator pasted a story. Segment their words rather than drafting new ones -- the
+        # whole point of pasting is that the published video says what they wrote. Note this still
+        # goes through critic_script_qa afterwards: their own prose is checked for originality and
+        # policy like any draft, which matters because a pasted story may not be theirs to publish.
+        draft = call_structured(
+            f"Segment this story into video beats, preserving the wording:\n\n{user_script}",
+            _ScriptDraft,
+            system=_STORY_SEGMENTATION_SYSTEM_PROMPT,
+        )
+        log_and_trace(
+            STAGE_SCRIPT, "operator_story_segmented",
+            chars=len(user_script), beats=len(draft.beats),
+        )
+    else:
+        draft = call_structured(prompt, _ScriptDraft, system=_SCRIPT_WRITER_SYSTEM_PROMPT)
 
     beats: list[ScriptBeat] = []
     cursor = 0.0

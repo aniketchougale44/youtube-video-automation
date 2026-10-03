@@ -17,6 +17,8 @@ def start_run(
     debug_force_reject: dict | None = None,
     past_performance_summary: str | None = None,
     strategy_weight_adjustments: dict[str, float] | None = None,
+    user_topic: str | None = None,
+    user_script: str | None = None,
 ) -> tuple[str, dict]:
     """Compiles the graph and invokes it from START. Returns (thread_id, final_or_interrupted_state).
     `past_performance_summary` and `strategy_weight_adjustments` are pulled from Postgres by the
@@ -28,6 +30,8 @@ def start_run(
         run_id=run_id, thread_id=thread_id, debug_force_reject=debug_force_reject,
         past_performance_summary=past_performance_summary,
         strategy_weight_adjustments=strategy_weight_adjustments,
+        user_topic=user_topic,
+        user_script=user_script,
     )
 
     app = build_publish_graph().compile(checkpointer=checkpointer)

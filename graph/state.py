@@ -21,6 +21,15 @@ class PipelineState(TypedDict, total=False):
     # e.g. {"evergreen_bias": 0.05}; strategy_node folds it into its prompt
     strategy_weight_adjustments: dict[str, float] | None
 
+    # --- operator intent, set from the chat studio (api/routes/chat.py) ---
+    # A topic the operator asked for by name. When present, trend_research short-circuits to a
+    # single synthetic candidate rather than spending ~400 quota units discovering topics nobody
+    # asked about, and strategy_node builds its decision around it instead of picking.
+    user_topic: str | None
+    # A story the operator pasted. script_writer_node then segments *their* words into beats
+    # instead of drafting its own, so the published video says what they wrote.
+    user_script: str | None
+
     # --- stage outputs (dicts matching agents.schemas.*) ---
     trend_output: dict | None
     strategy_decision: dict | None
@@ -58,12 +67,16 @@ def initial_state(
     debug_force_reject: dict | None = None,
     past_performance_summary: str | None = None,
     strategy_weight_adjustments: dict[str, float] | None = None,
+    user_topic: str | None = None,
+    user_script: str | None = None,
 ) -> PipelineState:
     return PipelineState(
         run_id=run_id,
         thread_id=thread_id,
         past_performance_summary=past_performance_summary,
         strategy_weight_adjustments=strategy_weight_adjustments or {},
+        user_topic=user_topic,
+        user_script=user_script,
         retry_counts={},
         max_retries=max_retries,
         escalated=False,

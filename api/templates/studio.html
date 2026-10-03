@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AutoTube Studio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --bg:#0c0c0c; --box:#111; --hairline:rgba(255,255,255,.065);
+    --heading:#fafafa; --body:#c8c8c8; --muted:#8b8b8d; --placeholder:#aeaeae;
+    --chip-fill:rgba(255,255,255,.028); --bubble:#1c1c1c;
+    --grad:linear-gradient(90deg,#ffe776 0%,#ffd400 22%,#ffd000 40%,#c9c93c 60%,#86ca8a 76%,#78d0cd 100%);
+    --green:#23d92c; --amber:#ffd000; --red:#ff6b5e;
+  }
+  *{box-sizing:border-box}
+  html{font-size:16px;scroll-behavior:smooth}
+  @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{animation:none!important;transition:none!important}}
+  body{margin:0;background:var(--bg);color:#fff;font-family:"Inter","Helvetica Neue",Arial,system-ui,sans-serif;
+       -webkit-font-smoothing:antialiased;min-height:100dvh}
+
+  /* ---------- topbar ---------- */
+  .top{display:flex;align-items:center;gap:1rem;padding:clamp(14px,1.5vw,22px) clamp(16px,1.7vw,28px);
+       border-bottom:1px solid var(--hairline);position:sticky;top:0;background:rgba(12,12,12,.86);
+       backdrop-filter:blur(14px);z-index:20}
+  .brand{display:flex;align-items:center;gap:.65rem;font-weight:500;letter-spacing-.01em}
+  .brand svg{width:34px;height:34px;flex:0 0 auto}
+  .brand b{font-weight:600}
+  .pills{margin-left:auto;display:flex;gap:.5rem;flex-wrap:wrap}
+  .pill{display:inline-flex;align-items:center;gap:.42rem;font-size:.8rem;color:var(--body);
+        background:var(--chip-fill);border:1px solid var(--hairline);border-radius:999px;padding:.4rem .75rem;white-space:nowrap}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex:0 0 auto}
+  .dot.live{background:var(--green);box-shadow:0 0 7px rgba(45,220,55,.7);animation:pulse 2s ease-in-out infinite}
+  .dot.warn{background:var(--amber)} .dot.bad{background:var(--red)}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+
+  /* ---------- layout ---------- */
+  .wrap{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(300px,.95fr);gap:clamp(14px,1.5vw,22px);
+        padding:clamp(14px,1.6vw,24px);max-width:1520px;margin:0 auto;align-items:start}
+  @media (max-width:1040px){.wrap{grid-template-columns:1fr}}
+
+  .card{background:linear-gradient(180deg,rgba(255,255,255,.028),rgba(255,255,255,0) 42%),var(--box);
+        border:1px solid var(--hairline);border-radius:clamp(14px,1.3vw,20px);
+        box-shadow:0 2px 40px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.04)}
+  .card h2{margin:0;font-size:.78rem;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+  .card-h{padding:clamp(14px,1.3vw,18px) clamp(16px,1.5vw,22px);border-bottom:1px solid var(--hairline);
+          display:flex;align-items:center;gap:.6rem}
+  .card-b{padding:clamp(14px,1.4vw,20px) clamp(16px,1.5vw,22px)}
+
+  /* ---------- chat ---------- */
+  .chat{display:flex;flex-direction:column;height:calc(100dvh - 148px);min-height:460px}
+  .msgs{flex:1;overflow-y:auto;padding:clamp(16px,1.6vw,24px);display:flex;flex-direction:column;gap:1rem}
+  .msgs::-webkit-scrollbar{width:9px}.msgs::-webkit-scrollbar-thumb{background:#262626;border-radius:9px}
+  .row{display:flex;gap:.7rem;align-items:flex-start;animation:lift .45s cubic-bezier(.22,1,.36,1) both}
+  @keyframes lift{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  .row.me{justify-content:flex-end}
+  .av{width:28px;height:28px;border-radius:50%;flex:0 0 auto;margin-top:2px}
+  .av.ai{background:linear-gradient(105deg,#f5c40a 0%,#dcae3f 40%,#6ac6a0 62%,#22c0cf 100%)}
+  .av.me{background:#2a2a2a;display:grid;place-items:center}
+  .bub{background:var(--bubble);color:#efefef;border-radius:14px;padding:.72rem .9rem;max-width:78%;
+       font-size:.93rem;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+  .row.me .bub{background:#232323}
+  .bub a{color:#78d0cd}
+  .bub code{background:rgba(255,255,255,.07);padding:.1em .38em;border-radius:5px;font-size:.88em}
+  .bub strong{color:#fff;font-weight:600}
+  .bub em{color:var(--muted);font-style:normal;font-size:.86em;display:block;margin-top:.4rem}
+
+  /* composer with the gradient underglow */
+  .comp-shell{padding:clamp(12px,1.2vw,18px);border-top:1px solid var(--hairline);isolation:isolate}
+  .comp{position:relative;background:linear-gradient(180deg,rgba(255,255,255,.028),rgba(255,255,255,0) 42%),var(--box);
+        border:1px solid var(--hairline);border-radius:16px;padding:clamp(12px,1.1vw,16px)}
+  .comp::after{content:"";position:absolute;left:0;right:0;top:0;bottom:-4px;border-radius:inherit;
+               background:var(--grad);filter:blur(.4px);opacity:.92;z-index:-1}
+  .comp textarea{width:100%;background:transparent;border:0;resize:none;color:#fff;font:inherit;
+                 font-size:.96rem;line-height:1.5;outline:none;min-height:46px;max-height:230px}
+  .comp textarea::placeholder{color:var(--placeholder)}
+  .comp-row{display:flex;align-items:center;gap:.6rem;margin-top:.5rem}
+  .hint{font-size:.76rem;color:var(--muted)}
+  .send{margin-left:auto;width:42px;height:42px;border-radius:50%;border:0;cursor:pointer;padding:1.3px;
+        background:var(--grad);display:grid;place-items:center}
+  .send span{width:100%;height:100%;border-radius:50%;background:#141414;display:grid;place-items:center}
+  .send:hover{filter:brightness(1.08)} .send:active{transform:scale(.95)}
+  .send:disabled{opacity:.45;cursor:not-allowed}
+
+  /* ---------- right column ---------- */
+  .stack{display:flex;flex-direction:column;gap:clamp(14px,1.5vw,22px)}
+  .kv{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--hairline);font-size:.88rem}
+  .kv:last-child{border-bottom:0}
+  .kv span:first-child{color:var(--muted)}
+  .kv span:last-child{color:var(--heading);text-align:right;font-weight:500}
+  .bar{height:5px;border-radius:999px;background:#1e1e1e;overflow:hidden;margin-top:.6rem}
+  .bar i{display:block;height:100%;background:var(--grad);border-radius:999px;transition:width .5s ease}
+  .idea{display:block;width:100%;text-align:left;background:var(--chip-fill);border:1px solid var(--hairline);
+        color:var(--body);border-radius:11px;padding:.65rem .8rem;font:inherit;font-size:.87rem;cursor:pointer;
+        margin-bottom:.5rem;transition:background .18s,border-color .18s}
+  .idea:hover{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.18);color:#fff}
+  .idea:last-child{margin-bottom:0}
+  .empty{color:var(--muted);font-size:.87rem;line-height:1.55}
+  .vid{display:flex;gap:.7rem;align-items:center;text-decoration:none;color:inherit;padding:.5rem 0}
+  .vid img{width:84px;height:47px;object-fit:cover;border-radius:7px;background:#1a1a1a;flex:0 0 auto}
+  .vid div{min-width:0}
+  .vid b{display:block;font-size:.86rem;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .vid small{color:var(--muted);font-size:.76rem}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">
+    <svg viewBox="0 0 52 52" aria-hidden="true"><g class="rays" stroke="#f4f4f4" stroke-width="1.4" stroke-linecap="round"></g><circle cx="26" cy="26" r="7.4" fill="#fbfbfb"/></svg>
+    <span>AutoTube <b>Studio</b></span>
+  </div>
+  <div class="pills" id="pills"><span class="pill"><i class="dot"></i>connecting…</span></div>
+</header>
+
+<main class="wrap">
+  <section class="card chat">
+    <div class="card-h"><h2>Conversation</h2><span class="hint" id="thinking"></span></div>
+    <div class="msgs" id="msgs"></div>
+    <div class="comp-shell">
+      <div class="comp">
+        <textarea id="input" rows="1" placeholder="Ask what's happening, name a topic, or paste a story…"></textarea>
+        <div class="comp-row">
+          <span class="hint">Enter to send · Shift+Enter for a new line</span>
+          <button class="send" id="send" aria-label="Send">
+            <span><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fafafa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <aside class="stack">
+    <div class="card">
+      <div class="card-h"><h2>Live run</h2></div>
+      <div class="card-b" id="live"><p class="empty">Loading…</p></div>
+    </div>
+    <div class="card">
+      <div class="card-h"><h2>Ideas</h2></div>
+      <div class="card-b" id="ideas">
+        <button class="idea">What's happening right now?</button>
+        <button class="idea">Give me some video ideas</button>
+        <button class="idea">Make a video about counting to ten for toddlers</button>
+        <p class="empty" style="margin:.7rem 0 0">Or paste a story into the chat and it becomes the video, in your words.</p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-h"><h2>Published</h2></div>
+      <div class="card-b" id="published"><p class="empty">Loading…</p></div>
+    </div>
+  </aside>
+</main>
+
+<script>
+// logo rays, generated rather than shipped as an asset
+(function(){
+  const g=document.querySelector('.rays'); if(!g) return;
+  for(let i=0;i<24;i++){
+    const a=-Math.PI/2 + i*(Math.PI*2/24);
+    const l=document.createElementNS('http://www.w3.org/2000/svg','line');
+    l.setAttribute('x1',26+10.4*Math.cos(a)); l.setAttribute('y1',26+10.4*Math.sin(a));
+    l.setAttribute('x2',26+22.6*Math.cos(a)); l.setAttribute('y2',26+22.6*Math.sin(a));
+    g.appendChild(l);
+  }
+})();
+
+const $=s=>document.querySelector(s);
+const msgs=$('#msgs'), input=$('#input'), send=$('#send'), thinking=$('#thinking');
+
+// Minimal, escape-first markdown. Everything is escaped before any tag is introduced, so a reply
+// containing a run error with angle brackets can never inject markup.
+//
+// Code spans are lifted out first and restored last. Without that, the other rules rewrite the
+// inside of them -- and almost every identifier this pipeline reports is snake_case, so the
+// italics rule turned `evergreen_bias` into "evergreen<em>bias</em>" on the very first real reply.
+// Italics additionally require the underscores to sit on word boundaries, so stray ones in
+// max_ai_video_beats_per_run cannot pair up across a sentence.
+function fmt(t){
+  const code=[];
+  let s=String(t)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/`([^`]+)`/g,(_m,c)=>`\u0000${code.push(c)-1}\u0000`);
+  s=s
+    .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+    .replace(/(^|\s)_([^_\n]+)_(?=\s|[.,!?)]|$)/g,'$1<em>$2</em>')
+    .replace(/(https?:\/\/[^\s)]+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>')
+    .replace(/^[-*] +/gm,'• ');
+  return s.replace(/\u0000(\d+)\u0000/g,(_m,i)=>`<code>${code[i]}</code>`);
+}
+function bubble(text, who){
+  const row=document.createElement('div'); row.className='row '+(who==='me'?'me':'');
+  const av=document.createElement('div'); av.className='av '+(who==='me'?'me':'ai');
+  if(who==='me') av.innerHTML='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#bdbdbd" stroke-width="2"><circle cx="12" cy="8" r="3.4"/><path d="M5 20c1.5-3.6 4-5.2 7-5.2s5.5 1.6 7 5.2"/></svg>';
+  const b=document.createElement('div'); b.className='bub'; b.innerHTML=fmt(text);
+  if(who==='me') row.append(b,av); else row.append(av,b);
+  msgs.append(row); msgs.scrollTop=msgs.scrollHeight;
+}
+
+async function ask(text){
+  if(!text.trim()) return;
+  bubble(text,'me'); input.value=''; input.style.height='auto';
+  send.disabled=true; thinking.textContent='thinking…';
+  try{
+    const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    bubble(d.reply,'ai');
+    if(d.suggestions&&d.suggestions.length) renderIdeas(d.suggestions);
+    if(d.run_id) refresh();
+  }catch(e){
+    bubble('Could not reach the studio API — '+e.message+'. Is the api container up?','ai');
+  }finally{ send.disabled=false; thinking.textContent=''; }
+}
+
+function renderIdeas(list){
+  const box=$('#ideas'); box.innerHTML='';
+  list.forEach(t=>{ const b=document.createElement('button'); b.className='idea'; b.textContent=t; box.append(b); });
+}
+$('#ideas').addEventListener('click',e=>{ if(e.target.classList.contains('idea')) ask(e.target.textContent); });
+
+send.addEventListener('click',()=>ask(input.value));
+input.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); ask(input.value); }});
+input.addEventListener('input',()=>{ input.style.height='auto'; input.style.height=Math.min(input.scrollHeight,230)+'px'; });
+
+// ---------- status panes, polled from the existing dashboard snapshot ----------
+function pill(label,cls){ return `<span class="pill"><i class="dot ${cls||''}"></i>${label}</span>`; }
+
+async function refresh(){
+  try{
+    const r=await fetch('/dashboard/snapshot'); if(!r.ok) throw new Error('HTTP '+r.status);
+    const s=await r.json(), st=s.stats||{}, runs=s.runs||[];
+
+    const active=runs.find(x=>['running','pending','awaiting_approval'].includes(x.status));
+    $('#pills').innerHTML =
+      pill(active?`${active.status.replace('_',' ')}`:'idle', active?'live':'') +
+      pill(`${st.published||0} published`) +
+      pill(`$${(st.cost_total_usd||0).toFixed(2)} spend`) +
+      pill(`${st.needs_attention||0} need attention`, (st.needs_attention||0)>0?'warn':'');
+
+    if(active){
+      const pct=active.progress_total?Math.round(100*active.progress/active.progress_total):0;
+      $('#live').innerHTML=`
+        <div class="kv"><span>Topic</span><span>${esc(active.topic)}</span></div>
+        <div class="kv"><span>Stage</span><span>${esc(active.stage_label||'—')}</span></div>
+        <div class="kv"><span>Progress</span><span>${active.progress||0}/${active.progress_total||0}</span></div>
+        <div class="bar"><i style="width:${pct}%"></i></div>`;
+    } else {
+      $('#live').innerHTML='<p class="empty">Nothing running. Name a topic or paste a story to start one.</p>';
+    }
+
+    const pub=runs.filter(x=>x.youtube_url).slice(0,4);
+    $('#published').innerHTML = pub.length ? pub.map(v=>`
+      <a class="vid" href="${esc(v.youtube_url)}" target="_blank" rel="noopener">
+        ${v.thumbnail_url?`<img src="${esc(v.thumbnail_url)}" alt="">`:'<img alt="">'}
+        <div><b>${esc(v.topic)}</b><small>${esc(v.status)} · $${(v.cost_usd||0).toFixed(2)}</small></div>
+      </a>`).join('') : '<p class="empty">Nothing published yet.</p>';
+  }catch(e){
+    $('#pills').innerHTML=pill('api unreachable','bad');
+  }
+}
+function esc(t){ return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+bubble("I'm wired into the pipeline. Ask **what's happening right now**, name a topic to make a video about, paste a story to turn into a video, or ask for **ideas**.",'ai');
+refresh(); setInterval(refresh, 5000);
+</script>
+</body>
+</html>

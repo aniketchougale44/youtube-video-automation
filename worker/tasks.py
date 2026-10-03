@@ -68,6 +68,7 @@ def run_pipeline_task(self, run_id: str) -> dict:
             return {"run_id": run_id, "status": str(run.status), "already_published": published.youtube_video_id}
 
         debug_force_reject = (run.stage_status or {}).get("debug_force_reject", {})
+        user_inputs = (run.stage_status or {}).get("user_inputs") or {}
         past_performance_summary = summarize_recent_performance(db)
         strategy_weight_adjustments = latest_strategy_weight_adjustments(db)
         db.commit()  # release the read transaction — postgres_checkpointer() runs DDL (CREATE
@@ -80,6 +81,8 @@ def run_pipeline_task(self, run_id: str) -> dict:
                 debug_force_reject=debug_force_reject,
                 past_performance_summary=past_performance_summary,
                 strategy_weight_adjustments=strategy_weight_adjustments,
+                user_topic=user_inputs.get("topic") or None,
+                user_script=user_inputs.get("script") or None,
             )
             # Must be drained *inside* the scope: collecting() resets the ContextVar on exit, so
             # reading it afterwards returns an empty list and every cost row is silently lost.
