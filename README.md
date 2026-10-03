@@ -138,6 +138,27 @@ which is a slideshow rather than a video. With it, a measured run sourced real H
 Optional, not blocking: `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID` / `SMTP_*` (Slack-only alerting
 works fine without them), `FREESOUND_API_KEY` (a synthesized pad is used otherwise).
 
+## Chat studio
+
+`/dashboard/studio` runs the pipeline by conversation. Four things it does:
+
+- **"what's happening right now?"** — current stage and progress, last published video, quota left,
+  what the feedback loop has learned, and whether the approval gate is on.
+- **"make a video about counting to ten"** — queues a run on that topic. Naming it skips trend
+  research, saving ~400 quota units, since you have already decided what the video is about.
+- **paste a story** — the video is built from *your* words. `script_writer_node` segments the text
+  into beats rather than drafting its own, so the narration is what you wrote. It still passes the
+  originality and compliance critics, which matters if the story is not yours to publish.
+- **"give me some ideas"** — suggestions drawn from channel goals and what has actually performed.
+
+Two things worth knowing about how it answers. Status replies are assembled from Postgres and Redis
+rows and never generated — the LLM is used only to classify what you asked for, because an operator
+asking what is happening needs a fact, not a paraphrase. And if the LLM is unreachable the endpoint
+still answers status, since that is exactly the question you ask when something looks wrong.
+
+A chat-requested run creates the same `Run` row the scheduler creates and takes the identical path
+through both critics and the approval gate. There is no second, weaker route to publishing.
+
 ## Architecture
 
 ### Pipeline (supervisor graph + worker + critic agents)
@@ -222,7 +243,8 @@ flowchart LR
 agents/schemas/   Pydantic I/O models for every worker + critic agent
 graph/            LangGraph state, agent nodes, supervisor graph, checkpointer
   nodes/          one module per agent group (research, script, visual, audio_render, publish, feedback, escalation)
-api/              FastAPI app: control API (/api/runs) + review dashboard (/dashboard)
+api/              FastAPI app: control API (/api/runs), review dashboard (/dashboard),
+                  chat studio (/dashboard/studio + /api/chat)
 worker/           Celery app + tasks (executes the graph outside the request/response cycle)
 scheduler/        APScheduler process — cron pipeline trigger + hourly performance-window check
 db/               SQLAlchemy models, Alembic migrations, CRUD helpers
@@ -267,6 +289,7 @@ serves on `:8000`), `worker` (Celery), and `scheduler` (APScheduler, its own pro
 
 - API docs: http://localhost:8000/docs
 - Review dashboard: http://localhost:8000/dashboard/
+- Chat studio: http://localhost:8000/dashboard/studio
 
 > Note: this repo was scaffolded and verified in an environment without a running Docker daemon
 > available for a full container build/integration test. `docker compose config` validates the
