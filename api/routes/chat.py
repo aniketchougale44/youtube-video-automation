@@ -11,8 +11,11 @@ goes through the identical graph, critics and approval gate as a cron-triggered 
 second, weaker path to publishing.
 """
 
+import uuid
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from agents.schemas.common import RunStatus
@@ -28,6 +31,7 @@ from db.crud import (
     list_runs,
     summarize_recent_performance,
 )
+from db.models import ChatMessage
 
 logger = get_logger("api.chat")
 router = APIRouter()
@@ -272,6 +276,62 @@ def _no_pending_reply(intent: str) -> ChatReply:
     )
 
 
+
+MAX_HISTORY = 60
+
+
+def _remember(db: Session, user_id, role: str, content: str,
+              intent: str | None = None, run_id: str | None = None, review: dict | None = None) -> None:
+    """Appends one turn. Best-effort: a conversation that cannot be written down is not a reason
+    to fail the reply the operator is waiting for."""
+    try:
+        db.add(ChatMessage(
+            user_id=user_id, role=role, content=content, intent=intent,
+            run_id=uuid.UUID(run_id) if run_id else None, review=review,
+        ))
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.warning("chat.history_write_failed", error=str(exc))
+
+
+@router.get("/history")
+def history(db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
+    """The conversation so far, oldest first, so the studio can restore itself on load.
+
+    Capped at the most recent MAX_HISTORY turns: the page replays every one of these into the
+    DOM on open, and an operator who has been using this for months should not wait on a
+    thousand of them to find the video waiting for a decision.
+    """
+    rows = db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.user_id == user.id)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(MAX_HISTORY)
+    ).scalars().all()
+    return {
+        "messages": [
+            {
+                "role": m.role,
+                "content": m.content,
+                "intent": m.intent,
+                "run_id": str(m.run_id) if m.run_id else None,
+                "review": m.review,
+                "at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in reversed(rows)  # query is newest-first to apply the limit; replay oldest-first
+        ]
+    }
+
+
+@router.delete("/history")
+def clear_history(db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
+    deleted = db.query(ChatMessage).filter(ChatMessage.user_id == user.id).delete()
+    db.commit()
+    logger.info("chat.history_cleared", user_id=str(user.id), deleted=deleted)
+    return {"deleted": deleted}
+
+
 @router.post("", response_model=ChatReply)
 @router.post("/", response_model=ChatReply)
 def chat(
@@ -279,7 +339,23 @@ def chat(
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> ChatReply:
+    """Records both sides of the turn around the reply.
+
+    A thin wrapper rather than a _remember() call before each return: the handler below has a
+    dozen exit points, one per intent, and the one that gets forgotten would be the one whose
+    message quietly vanished from the history.
+    """
     message = request.message.strip()
+    _remember(db, user.id, "user", message)
+    reply = _answer(message, db, user)
+    _remember(
+        db, user.id, "assistant", reply.reply,
+        intent=reply.intent, run_id=reply.run_id, review=reply.review,
+    )
+    return reply
+
+
+def _answer(message: str, db: Session, user) -> ChatReply:
 
     try:
         parsed = call_structured(message, _Intent, system=_INTENT_SYSTEM)

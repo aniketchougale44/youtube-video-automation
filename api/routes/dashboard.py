@@ -595,7 +595,9 @@ def dashboard_index(request: Request, db: Session = Depends(get_db), user=Depend
     # The approval queue, run table, and activity feed all render client-side from this one
     # snapshot (embedded for first paint, then refreshed over /stream) so nothing on the page
     # needs a manual reload to stay current.
-    return templates.TemplateResponse(request, "index.html", {"snapshot": _build_snapshot(db)})
+    return templates.TemplateResponse(
+        request, "index.html", {"snapshot": _build_snapshot(db, user_id=user.id)}
+    )
 
 
 @router.get("/stream")
@@ -603,11 +605,15 @@ def dashboard_stream(user=Depends(require_user)):
     """Server-Sent Events feed: pushes a fresh snapshot (run statuses, live pipeline position,
     recent agent activity, cost) every 2s so the dashboard updates without polling or a reload."""
 
+    # Captured before the generator starts: the request-scoped session and the dependency are
+    # gone by the time the stream is producing, so the id has to be held, not re-resolved.
+    user_id = user.id
+
     def event_source():
         while True:
             db = SessionLocal()
             try:
-                payload = _build_snapshot(db)
+                payload = _build_snapshot(db, user_id=user_id)
                 yield f"data: {json.dumps(payload)}\n\n"
             except Exception as exc:
                 yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"

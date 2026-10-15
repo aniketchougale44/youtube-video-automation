@@ -399,9 +399,46 @@ async function refreshChannel(){
   }
 }
 
-bubble("I'm wired into the pipeline. Name a topic — _upload a video of a story for children_ — and I'll build it, then **show it to you here before anything is published**. You decide: **upload it**, **change the title to …**, or **scrap it**.\n\nYou can also paste a story to use your own words, ask **what's happening right now**, or ask for **ideas**.",'ai');
-refresh(); setInterval(refresh, 5000);
-refreshChannel(); setInterval(refreshChannel, 60000);  // server-cached 5min; this just picks it up
+const GREETING = "I'm wired into the pipeline. Name a topic — _upload a video of a story for children_ — and I'll build it, then **show it to you here before anything is published**. You decide: **upload it**, **change the title to …**, or **scrap it**.\n\nYou can also paste a story to use your own words, ask **what's happening right now**, or ask for **ideas**.";
+
+// The conversation is restored from the server, not from browser memory, so moving to Ops and
+// back no longer starts from nothing -- and a review card for a video still awaiting a decision
+// comes back with it, since that is the message there is actually something to do about.
+async function restore(){
+  try{
+    const r=await fetch('/api/chat/history');
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const msgs=(await r.json()).messages||[];
+    if(!msgs.length){ bubble(GREETING,'ai'); return; }
+    msgs.forEach(m=>{
+      bubble(m.content, m.role==='user'?'me':'ai');
+      // Only re-render a card for a run still waiting: replaying buttons for a video that has
+      // since been published or scrapped invites a click that can only fail.
+      if(m.review && awaitingIds.has(m.review.id)) reviewCard(m.review);
+    });
+    // Mark every restored card as already announced, so the 5s poll does not post a second copy
+    // of a card the operator is already looking at.
+    msgs.forEach(m=>{ if(m.review) announced.add(m.review.id); });
+  }catch(e){
+    bubble(GREETING,'ai');
+  }
+}
+
+// Which runs are still parked, fetched before replaying so the restore knows which cards are
+// still actionable.
+let awaitingIds = new Set();
+async function boot(){
+  try{
+    const r=await fetch('/dashboard/snapshot');
+    if(r.ok){ const s=await r.json(); awaitingIds=new Set((s.approvals||[]).map(a=>a.id)); }
+  }catch(e){ /* restore still works, it just replays no cards */ }
+  await restore();
+  // Polling starts only once the history is on screen. Starting it first lets refresh() announce
+  // a waiting card before restore() has marked it announced, posting it twice.
+  refresh(); setInterval(refresh, 5000);
+  refreshChannel(); setInterval(refreshChannel, 60000);  // server-cached 5min; this just picks it up
+}
+boot();
 </script>
 </body>
 </html>

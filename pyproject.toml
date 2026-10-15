@@ -52,7 +52,12 @@ dependencies = [
     "moviepy>=1.0.3",
     "pillow>=10.4.0",
     "numpy>=1.26.0",
-    "edge-tts>=7.0.0",  # free, keyless TTS (Microsoft Edge neural voices)
+    # Floor raised from 7.0.0: Microsoft began requiring a Sec-MS-GEC token on the synthesis
+    # socket, and versions without it get 403 "Invalid response status" on every call. edge-tts
+    # is the LAST fallback in tools/tts.py, so that 403 is not a degraded voice, it is a failed
+    # run -- observed killing a run at the voiceover node after research and scripting had
+    # already been paid for.
+    "edge-tts>=7.3.1",  # free, keyless TTS (Microsoft Edge neural voices)
     # HTTP
     "httpx>=0.27.0",
 ]

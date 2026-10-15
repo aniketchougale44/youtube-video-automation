@@ -24,6 +24,11 @@
     header a { text-decoration: none; color: inherit; }
     header h2 { margin: 0; }
     .header-right { display: flex; align-items: center; gap: 1.25rem; }
+    .page-tabs { display: flex; gap: 0.4rem; margin-right: auto; margin-left: 1.2rem; }
+    .page-tabs a { font-size: 0.84rem; padding: 0.38rem 0.72rem; border-radius: 8px;
+                   border: 1px solid transparent; color: var(--muted); }
+    .page-tabs a:hover { background: rgba(255,255,255,.05); color: #fff; }
+    .page-tabs a.on { background: rgba(255,255,255,.028); border-color: var(--border); color: #fff; }
 
     .section { margin: 2rem 0; }
     .section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.6rem; }
@@ -155,9 +160,16 @@
 <body>
   <header>
     <a href="/dashboard/"><h2>AutoTube AI — Live Dashboard</h2></a>
+    <!-- The same three tabs the studio and ops pages carry. Without them this page was a dead
+         end: it is reachable from the others, but offered no way back to them. -->
+    <nav class="page-tabs">
+      <a href="/dashboard/studio">Studio</a>
+      <a href="/dashboard/ops">Ops</a>
+      <a href="/dashboard/" class="on" aria-current="page">Runs</a>
+    </nav>
     <div class="header-right">
       <span class="live-indicator"><span class="live-dot" id="live-dot"></span><span id="live-text">connecting…</span></span>
-      <a href="/docs">API docs</a>
+      <a href="/auth/logout">Sign out</a>
     </div>
   </header>
   {% block content %}{% endblock %}

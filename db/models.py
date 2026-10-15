@@ -94,6 +94,36 @@ class UserCredential(Base):
     user: Mapped["User"] = relationship(back_populates="credential")
 
 
+class ChatMessage(Base):
+    """One turn of the studio conversation, so it survives a page change.
+
+    The chat was browser-memory only: clicking through to Ops and back lost everything, including
+    the review card for a finished video waiting on a decision. Stored per account rather than in
+    localStorage because the conversation belongs to the account, not to the browser -- two people
+    sharing a machine must not read each other's, and the same account on a phone should see the
+    same history.
+
+    `review` holds the card payload that accompanied an assistant turn, so a reloaded page can
+    re-render the player and the approve/change buttons instead of a bare sentence about a video
+    the operator can no longer see.
+    """
+
+    __tablename__ = "chat_messages"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(16))  # "user" | "assistant"
+    content: Mapped[str] = mapped_column(Text)
+    intent: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), nullable=True
+    )
+    review: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Run(Base):
     """One row per pipeline execution. The single source of truth for resumability."""
 
