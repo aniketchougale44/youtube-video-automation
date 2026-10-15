@@ -18,6 +18,8 @@ other test in the suite (so pipeline tests never hit the real network), which wo
 shadow the exact fallback logic these tests need to exercise."""
 import types
 
+import pytest
+
 from tools.embeddings import embed_text as _real_embed_text
 from tools.image_gen import generate_image as _real_generate_image
 
@@ -246,3 +248,81 @@ def test_a_provider_with_no_balance_is_benched_instead_of_retried(monkeypatch):
 
     assert calls["deepseek"] == 1, "the unpaid provider should be tried once, then benched"
     assert calls["groq"] == 2, "every call still gets served by the working provider"
+
+
+def test_a_bad_moment_across_every_provider_is_retried_not_fatal(monkeypatch):
+    """groq answering 400 "failed to parse tool call" and gemini answering 503 "model is
+    overloaded" in the same second produced "no usable LLM provider" and killed a run that was
+    already twenty minutes deep. Neither needed a human; both needed a few seconds."""
+    from pydantic import BaseModel
+
+    from core import llm
+
+    class _Out(BaseModel):
+        answer: str
+
+    attempts = {"n": 0}
+
+    class _Flaky:
+        def with_structured_output(self, *_a, **_k):
+            return self
+
+        def invoke(self, _messages):
+            attempts["n"] += 1
+            if attempts["n"] <= 2:
+                raise RuntimeError("503 UNAVAILABLE. This model is overloaded")
+            return {"parsed": _Out(answer="ok"), "raw": None}
+
+    flaky = _Flaky()
+    monkeypatch.setattr(llm, "_PROVIDERS", (("groq", lambda: flaky), ("gemini", lambda: flaky)))
+    monkeypatch.setattr(llm, "_unusable_until", {})
+    monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)  # no real backoff in tests
+
+    assert llm.call_structured("hi", _Out).answer == "ok"
+    assert attempts["n"] == 3
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "429 RESOURCE_EXHAUSTED: quota exceeded for this model, retry shortly",
+        "503 UNAVAILABLE. This model is overloaded, please try again",
+        "Error code: 400 - Failed to parse tool call arguments",
+        "Read timed out after 60s",
+    ],
+)
+def test_a_transient_failure_does_not_bench_a_working_provider(monkeypatch, message):
+    """The bench list once held "quota" and the bare strings "401"/"402"/"403". "quota" matches a
+    free tier's rate limit, which clears in seconds, and a bare "402" matches anywhere in the
+    text -- including inside a request id. Either would take a healthy provider out of the chain
+    for ten minutes."""
+    from core import llm
+
+    monkeypatch.setattr(llm, "_unusable_until", {})
+    llm._mark_unusable_if_terminal("gemini", RuntimeError(message))
+    assert "gemini" not in llm._unusable_until
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Error code: 402 - {'error': {'message': 'Insufficient Balance'}}",
+        "Incorrect API key provided",
+        "API key not valid. Please pass a valid API key.",
+    ],
+)
+def test_a_credential_a_human_must_fix_still_benches(monkeypatch, message):
+    from core import llm
+
+    monkeypatch.setattr(llm, "_unusable_until", {})
+    llm._mark_unusable_if_terminal("deepseek", RuntimeError(message))
+    assert "deepseek" in llm._unusable_until
+
+
+def test_when_every_provider_is_benched_they_are_tried_anyway(monkeypatch):
+    """Failing a run outright is worse than trying a provider that probably cannot pay."""
+    from core import llm
+
+    monkeypatch.setattr(llm, "_PROVIDERS", (("groq", lambda: object()),))
+    monkeypatch.setattr(llm, "_unusable_until", {"groq": llm.time.monotonic() + 600})
+    assert [name for name, _ in llm._usable_providers()] == ["groq"]

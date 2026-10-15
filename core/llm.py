@@ -109,9 +109,36 @@ _PROVIDERS = (
 # worth retrying next call; "Insufficient Balance" will be just as true a second later, and a
 # human has to go and fix it. Those get the provider skipped for a while instead.
 _PROVIDER_COOLDOWN_SECONDS = 600
-_UNUSABLE_SIGNS = ("insufficient balance", "invalid api key", "incorrect api key",
-                   "401", "402", "403", "quota", "billing")
+
+# Only unambiguous, human-must-intervene failures. This list also held "quota" and the bare
+# strings "401"/"402"/"403", which was a trap twice over:
+#
+#   - "quota" matches a free tier's RATE LIMIT ("RESOURCE_EXHAUSTED ... quota"), which clears in
+#     seconds. Benching on that takes a working provider out of the chain for ten minutes.
+#   - a bare "402" matches anywhere in the text, including inside a request id, so an unrelated
+#     error could bench a healthy provider by coincidence.
+#
+# Everything else -- 429, 503, timeouts, a malformed tool call -- is transient, and is retried.
+_UNUSABLE_SIGNS = (
+    "insufficient balance",
+    "insufficient_quota",      # OpenAI's billing error; distinct from its rate limit
+    "invalid api key",
+    "incorrect api key",
+    "api key not valid",
+    "payment required",
+    "billing",
+)
 _unusable_until: dict[str, float] = {}
+
+# Sentinel for "the model declined to call a tool", distinct from a provider failure.
+_NO_TOOL = object()
+
+# How many times to walk the whole chain before giving up, and the pause between passes. groq
+# (400 "failed to parse tool call") and gemini (503 "model is overloaded") were observed failing
+# in the same moment; with a single pass that is a dead run, twenty minutes of work in, for
+# something that clears by itself. A second pass seconds later costs almost nothing.
+_CHAIN_ATTEMPTS = 3
+_CHAIN_BACKOFF_SECONDS = 2.0
 
 
 def _mark_unusable_if_terminal(provider_name: str, exc: Exception) -> None:
@@ -124,39 +151,54 @@ def _mark_unusable_if_terminal(provider_name: str, exc: Exception) -> None:
         )
 
 
-def call_structured(prompt: str, output_model: type[T], system: str | None = None) -> T:
-    """Invokes each configured provider in order with structured output (`output_model`) until
-    one succeeds. Raises NoLLMProviderConfigured if none are configured or all fail."""
-    messages = ([("system", system)] if system else []) + [("human", prompt)]
 
+def _usable_providers():
+    """Providers worth trying right now, in order.
+
+    If every configured provider is benched, the benches are ignored for this call rather than
+    reporting "nothing configured". A provider that probably cannot pay is still a better bet
+    than failing a run outright, and the alternative is that one bad minute takes the whole
+    pipeline down for ten.
+    """
+    live = [(name, factory) for name, factory in _PROVIDERS if factory() is not None]
+    now = time.monotonic()
+    ready = [(n, f) for n, f in live if not (_unusable_until.get(n, 0) > now)]
+    if ready:
+        return ready
+    if live:
+        logger.warning("llm.all_benched_trying_anyway", providers=[n for n, _ in live])
+    return live
+
+
+def _run_chain(do_call, what: str):
+    """Walks the provider chain, and walks it again if the whole pass failed.
+
+    One pass used to be the whole policy, and that is not enough when the providers themselves
+    have a bad moment: groq answering 400 "failed to parse tool call" and gemini answering 503
+    "model is overloaded" within the same second produced "no usable LLM provider" and killed a
+    run that was already twenty minutes deep. Neither failure needed a human; both needed a few
+    seconds.
+
+    `do_call(provider_name, llm)` returns the result, or raises to move on to the next provider.
+    """
     last_error: Exception | None = None
-    for provider_name, factory in _PROVIDERS:
-        benched = _unusable_until.get(provider_name)
-        if benched and time.monotonic() < benched:
-            continue
-        llm = factory()
-        if llm is None:
-            continue
-        try:
-            # include_raw=True so token usage survives. with_structured_output() otherwise returns
-            # only the parsed model and the AIMessage carrying usage_metadata is discarded, which is
-            # why per-run spend could never be measured. Falls back to the plain call if a provider
-            # does not support it -- losing the cost row is acceptable, losing the video is not.
+    for attempt in range(_CHAIN_ATTEMPTS):
+        if attempt:
+            time.sleep(_CHAIN_BACKOFF_SECONDS * attempt)
+            logger.info("llm.chain_retry", attempt=attempt + 1, call=what)
+        for provider_name, factory in _usable_providers():
+            llm = factory()
+            if llm is None:
+                continue
             try:
-                wrapped = llm.with_structured_output(output_model, include_raw=True)
-                envelope = wrapped.invoke(messages)
-                result = envelope["parsed"] if isinstance(envelope, dict) else envelope
-                _record_usage(provider_name, _model_name(llm), envelope)
-            except TypeError:
-                result = llm.with_structured_output(output_model).invoke(messages)
-            if result is None:
-                raise ValueError("structured output returned no parsed value")
-            logger.info("llm.call.success", provider=provider_name, model=_model_name(llm))
-            return result
-        except Exception as exc:
-            logger.error("llm.call.failed", provider=provider_name, model=_model_name(llm), error=str(exc))
-            _mark_unusable_if_terminal(provider_name, exc)
-            last_error = exc
+                return do_call(provider_name, llm)
+            except Exception as exc:
+                logger.error(
+                    "llm.call.failed", provider=provider_name,
+                    model=_model_name(llm), error=str(exc), call=what,
+                )
+                _mark_unusable_if_terminal(provider_name, exc)
+                last_error = exc
 
     raise NoLLMProviderConfigured(
         "no usable LLM provider: set one of ANTHROPIC_API_KEY, OPENAI_API_KEY, DEEPSEEK_API_KEY "
@@ -165,12 +207,42 @@ def call_structured(prompt: str, output_model: type[T], system: str | None = Non
     ) from last_error
 
 
+def call_structured(prompt: str, output_model: type[T], system: str | None = None) -> T:
+    """Invokes each configured provider in order with structured output (`output_model`) until
+    one succeeds. Raises NoLLMProviderConfigured if none are configured or all fail."""
+    messages = ([("system", system)] if system else []) + [("human", prompt)]
+
+    def do_call(provider_name: str, llm):
+        # include_raw=True so token usage survives. with_structured_output() otherwise returns
+        # only the parsed model and the AIMessage carrying usage_metadata is discarded, which is
+        # why per-run spend could never be measured. Falls back to the plain call if a provider
+        # does not support it -- losing the cost row is acceptable, losing the video is not.
+        try:
+            wrapped = llm.with_structured_output(output_model, include_raw=True)
+            envelope = wrapped.invoke(messages)
+            result = envelope["parsed"] if isinstance(envelope, dict) else envelope
+            _record_usage(provider_name, _model_name(llm), envelope)
+        except TypeError:
+            result = llm.with_structured_output(output_model).invoke(messages)
+        if result is None:
+            raise ValueError("structured output returned no parsed value")
+        logger.info("llm.call.success", provider=provider_name, model=_model_name(llm))
+        return result
+
+    return _run_chain(do_call, "structured")
+
+
 def _record_usage(provider: str, model: str, envelope) -> None:
     """Pulls usage_metadata off the raw AIMessage and hands it to tools.cost. Best-effort: a
-    provider that reports no usage simply records nothing."""
-    if not isinstance(envelope, dict):
-        return
-    raw = envelope.get("raw")
+    provider that reports no usage simply records nothing.
+
+    Takes either shape: with_structured_output(include_raw=True) returns a dict with the message
+    under "raw", while bind_tools() returns the AIMessage itself. This used to return early on
+    anything that was not a dict, so every tool-selection call was free as far as the cost table
+    was concerned -- and an unmeasured call is indistinguishable, on the spend panel, from one
+    that never happened.
+    """
+    raw = envelope.get("raw") if isinstance(envelope, dict) else envelope
     usage = getattr(raw, "usage_metadata", None) or {}
     try:
         cost_tool.record_llm(
@@ -184,3 +256,43 @@ def _record_usage(provider: str, model: str, envelope) -> None:
 
 def _model_name(llm) -> str:
     return getattr(llm, "model", None) or getattr(llm, "model_name", None) or type(llm).__name__
+
+
+def choose_tool(
+    prompt: str, tools: list[type[BaseModel]], system: str | None = None
+) -> tuple[str, dict] | None:
+    """Asks the first working provider which tool to call, and with what arguments.
+
+    Returns (tool_name, args), or None when the model declined to call anything -- which the
+    caller should treat as "I did not understand", not as an error.
+
+    The same provider chain and benching as call_structured(): a provider that cannot pay is
+    skipped rather than retried on every message.
+
+    Deliberately one step, not a loop. Each tool here answers from the database and returns its
+    own finished text, so there is nothing for a second round to refine -- and an agent that can
+    keep calling tools until it decides to stop is an agent that can keep spending until it
+    decides to stop. Routing is the model's job; the facts are not.
+    """
+    messages = ([("system", system)] if system else []) + [("human", prompt)]
+
+    def do_call(provider_name: str, llm):
+        response = llm.bind_tools(tools).invoke(messages)
+        _record_usage(provider_name, _model_name(llm), response)
+        calls = getattr(response, "tool_calls", None) or []
+        logger.info(
+            "llm.tool_choice", provider=provider_name, model=_model_name(llm),
+            tool=calls[0]["name"] if calls else None,
+        )
+        if not calls:
+            return _NO_TOOL
+        # Only the first call is honoured. A model asked "what's happening and make me a video"
+        # can emit both, and silently doing the second half of a compound request is worse than
+        # answering the first and letting the operator ask again.
+        return calls[0]["name"], dict(calls[0].get("args") or {})
+
+    chosen = _run_chain(do_call, "tool_choice")
+    # _run_chain treats a raised exception as "try the next provider", so "the model chose not to
+    # call anything" has to come back as a value, not as None -- None would be indistinguishable
+    # from a provider returning nothing and would send the chain round again for no reason.
+    return None if chosen is _NO_TOOL else chosen
