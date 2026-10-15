@@ -67,6 +67,32 @@
   .bub strong{color:#fff;font-weight:600}
   .bub em{color:var(--muted);font-style:normal;font-size:.86em;display:block;margin-top:.4rem}
 
+  /* ---------- review card, rendered inside the conversation ----------
+     A finished video is reviewed where it was asked for, so approving never means hunting for a
+     separate screen. Sits at the full bubble width because a 78%-wide video player is unwatchable. */
+  .review{background:var(--box);border:1px solid rgba(255,255,255,.14);border-radius:14px;
+          max-width:78%;overflow:hidden}
+  .review video{display:block;width:100%;max-height:420px;background:#000}
+  .review-b{padding:.85rem .95rem}
+  .review-t{font-size:.95rem;font-weight:600;color:#fff;line-height:1.35;margin:0 0 .3rem}
+  .review-d{font-size:.83rem;color:var(--body);line-height:1.5;margin:0;
+            display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+  .review-meta{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.6rem}
+  .tag{font-size:.74rem;color:var(--body);background:var(--chip-fill);border:1px solid var(--hairline);
+       border-radius:999px;padding:.24rem .55rem}
+  .tag.ok{color:#9be89f;border-color:rgba(35,217,44,.3)}
+  .tag.bad{color:#ffa79e;border-color:rgba(255,107,94,.35)}
+  .thumbs{display:flex;gap:.4rem;margin-top:.6rem}
+  .thumbs img{width:76px;height:43px;object-fit:cover;border-radius:6px;border:1px solid var(--hairline)}
+  .acts{display:flex;flex-wrap:wrap;gap:.45rem;margin-top:.75rem}
+  .act{border:1px solid var(--hairline);background:var(--chip-fill);color:var(--body);border-radius:9px;
+       padding:.5rem .8rem;font:inherit;font-size:.85rem;cursor:pointer;transition:background .18s,border-color .18s}
+  .act:hover{background:rgba(255,255,255,.07);border-color:rgba(255,255,255,.2);color:#fff}
+  .act.go{background:var(--grad);color:#121212;font-weight:600;border-color:transparent}
+  .act.go:hover{filter:brightness(1.07)}
+  .act.no:hover{color:#ffa79e;border-color:rgba(255,107,94,.35)}
+  .review-link{display:inline-block;margin-top:.55rem;font-size:.78rem;color:#78d0cd}
+
   /* composer with the gradient underglow */
   .comp-shell{padding:clamp(12px,1.2vw,18px);border-top:1px solid var(--hairline);isolation:isolate}
   .comp{position:relative;background:linear-gradient(180deg,rgba(255,255,255,.028),rgba(255,255,255,0) 42%),var(--box);
@@ -121,7 +147,7 @@
     <div class="msgs" id="msgs"></div>
     <div class="comp-shell">
       <div class="comp">
-        <textarea id="input" rows="1" placeholder="Ask what's happening, name a topic, or paste a story…"></textarea>
+        <textarea id="input" rows="1" placeholder="Name a topic, paste a story, or tell me what to do with the video that's waiting…"></textarea>
         <div class="comp-row">
           <span class="hint">Enter to send · Shift+Enter for a new line</span>
           <button class="send" id="send" aria-label="Send">
@@ -140,10 +166,11 @@
     <div class="card">
       <div class="card-h"><h2>Ideas</h2></div>
       <div class="card-b" id="ideas">
+        <button class="idea">Upload a video of a story for children</button>
+        <button class="idea">Show me the video that's waiting</button>
         <button class="idea">What's happening right now?</button>
         <button class="idea">Give me some video ideas</button>
-        <button class="idea">Make a video about counting to ten for toddlers</button>
-        <p class="empty" style="margin:.7rem 0 0">Or paste a story into the chat and it becomes the video, in your words.</p>
+        <p class="empty" style="margin:.7rem 0 0">Or paste a story into the chat and it becomes the video, in your words. Nothing publishes until you approve it.</p>
       </div>
     </div>
     <div class="card">
@@ -198,6 +225,62 @@ function bubble(text, who){
   msgs.append(row); msgs.scrollTop=msgs.scrollHeight;
 }
 
+// A review lands in the conversation as a real card: the rendered file playing inline, the
+// metadata YouTube will show, and the decision buttons. Every button is a sentence sent back
+// through /api/chat rather than a direct call to an approve endpoint -- one path to publishing,
+// so a click and a typed "upload it" cannot diverge in what they do.
+function reviewCard(card){
+  const row=document.createElement('div'); row.className='row';
+  const av=document.createElement('div'); av.className='av ai';
+  const box=document.createElement('div'); box.className='review';
+
+  const c=card.compliance;
+  const tags=[];
+  if(c){
+    tags.push(c.passed?'<span class="tag ok">compliance passed</span>'
+                      :'<span class="tag bad">compliance failed</span>');
+    if(c.copyright_risk_score!=null) tags.push(`<span class="tag">copyright risk ${esc(c.copyright_risk_score)}</span>`);
+    if(!c.av_sync_ok) tags.push('<span class="tag bad">a/v out of sync</span>');
+    if(!c.spec_check_ok) tags.push('<span class="tag bad">spec check failed</span>');
+  } else {
+    tags.push('<span class="tag">compliance unreadable</span>');
+  }
+  if(card.short_id) tags.push(`<span class="tag">run ${esc(card.short_id)}</span>`);
+
+  const thumbs=(card.thumbnails||[]).filter(t=>t.url);
+
+  box.innerHTML=
+    (card.render_url
+      ? `<video controls preload="metadata" src="${esc(card.render_url)}"></video>`
+      : '')+
+    `<div class="review-b">
+       <p class="review-t">${esc(card.title)}</p>
+       ${card.description?`<p class="review-d">${esc(card.description)}</p>`:''}
+       <div class="review-meta">${tags.join('')}</div>
+       ${thumbs.length?`<div class="thumbs">${thumbs.map(t=>`<img src="${esc(t.url)}" alt="thumbnail option">`).join('')}</div>`:''}
+       <div class="acts">
+         <button class="act go" data-say="upload it">Upload to YouTube</button>
+         <button class="act" data-ask-title="1">Change the title…</button>
+         <button class="act no" data-say="scrap it">Scrap it</button>
+       </div>
+       <a class="review-link" href="/dashboard/${esc(card.id)}" target="_blank" rel="noopener">Open the full review →</a>
+     </div>`;
+
+  box.addEventListener('click',e=>{
+    const b=e.target.closest('button'); if(!b) return;
+    if(b.dataset.askTitle){
+      // Put the operator's cursor in the composer rather than prompting: a title is worth typing
+      // deliberately, and window.prompt would block the page.
+      input.value='change the title to '; input.focus();
+      input.style.height='auto'; input.style.height=Math.min(input.scrollHeight,230)+'px';
+      return;
+    }
+    if(b.dataset.say){ box.querySelectorAll('.act').forEach(x=>x.disabled=true); ask(b.dataset.say); }
+  });
+
+  row.append(av,box); msgs.append(row); msgs.scrollTop=msgs.scrollHeight;
+}
+
 async function ask(text){
   if(!text.trim()) return;
   bubble(text,'me'); input.value=''; input.style.height='auto';
@@ -207,8 +290,9 @@ async function ask(text){
     if(!r.ok) throw new Error('HTTP '+r.status);
     const d=await r.json();
     bubble(d.reply,'ai');
+    if(d.review) reviewCard(d.review);
     if(d.suggestions&&d.suggestions.length) renderIdeas(d.suggestions);
-    if(d.run_id) refresh();
+    if(d.run_id){ if(d.intent==='APPROVE'||d.intent==='REJECT') announced.delete(d.run_id); refresh(); }
   }catch(e){
     bubble('Could not reach the studio API — '+e.message+'. Is the api container up?','ai');
   }finally{ send.disabled=false; thinking.textContent=''; }
@@ -233,10 +317,22 @@ function staleWorkerPill(v){
 }
 function pill(label,cls){ return `<span class="pill"><i class="dot ${cls||''}"></i>${label}</span>`; }
 
+// Runs already shown as a review card. Without this the 5s poll re-posts the same video every
+// tick; cleared on approve/reject so a run that comes back round can announce itself again.
+const announced=new Set();
+
 async function refresh(){
   try{
     const r=await fetch('/dashboard/snapshot'); if(!r.ok) throw new Error('HTTP '+r.status);
     const s=await r.json(), st=s.stats||{}, runs=s.runs||[];
+
+    // A finished video shouldn't wait to be asked about -- it arrives in the conversation itself.
+    (s.approvals||[]).forEach(card=>{
+      if(announced.has(card.id)) return;
+      announced.add(card.id);
+      bubble(`**${card.title}** has finished rendering and is waiting on you.`,'ai');
+      reviewCard(card);
+    });
 
     const active=runs.find(x=>['running','pending','awaiting_approval'].includes(x.status));
     $('#pills').innerHTML =
@@ -294,7 +390,7 @@ async function refreshChannel(){
   }
 }
 
-bubble("I'm wired into the pipeline. Ask **what's happening right now**, name a topic to make a video about, paste a story to turn into a video, or ask for **ideas**.",'ai');
+bubble("I'm wired into the pipeline. Name a topic — _upload a video of a story for children_ — and I'll build it, then **show it to you here before anything is published**. You decide: **upload it**, **change the title to …**, or **scrap it**.\n\nYou can also paste a story to use your own words, ask **what's happening right now**, or ask for **ideas**.",'ai');
 refresh(); setInterval(refresh, 5000);
 refreshChannel(); setInterval(refreshChannel, 60000);  // server-cached 5min; this just picks it up
 </script>

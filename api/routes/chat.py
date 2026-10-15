@@ -10,16 +10,23 @@ Triggering a run here creates the same Run row the scheduler creates, so a chat-
 goes through the identical graph, critics and approval gate as a cron-triggered one. There is no
 second, weaker path to publishing.
 """
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from api.routes.dashboard import _build_snapshot
+from agents.schemas.common import RunStatus
+from api.routes.dashboard import _approval_rows, _build_snapshot
 from core.llm import call_structured
 from core.logging import get_logger
 from core.settings import get_settings
 from db.base import get_db
-from db.crud import create_run, latest_strategy_weight_adjustments, summarize_recent_performance
+from db.crud import (
+    create_run,
+    latest_strategy_weight_adjustments,
+    list_runs,
+    summarize_recent_performance,
+)
 
 logger = get_logger("api.chat")
 router = APIRouter()
@@ -36,6 +43,10 @@ class ChatReply(BaseModel):
     intent: str
     run_id: str | None = None
     suggestions: list[str] = Field(default_factory=list)
+    # Populated whenever a finished video is waiting on the operator. The dashboard renders this
+    # as a player + approve/change controls inside the conversation, so reviewing never means
+    # leaving the chat for a separate screen.
+    review: dict | None = None
 
 
 class _Intent(BaseModel):
@@ -47,11 +58,22 @@ class _Intent(BaseModel):
             "MAKE_TOPIC (asking for a video on a subject they name), "
             "FROM_STORY (they pasted a story/script to turn into a video), "
             "IDEAS (asking for content suggestions), "
+            "REVIEW (asking to see / preview / check the video that is waiting), "
+            "APPROVE (telling you to publish or upload the video that is waiting), "
+            "REJECT (telling you to scrap, bin or cancel the video that is waiting), "
+            "REVISE (asking to change the title or description of the waiting video), "
             "HELP (anything else, including greetings)"
         )
     )
     topic: str = Field(default="", description="For MAKE_TOPIC: the subject, as a short title")
     story: str = Field(default="", description="For FROM_STORY: the story text, verbatim")
+    new_title: str = Field(
+        default="",
+        description="For REVISE: the replacement title, if they gave one. Empty if they only said what to change in general terms.",
+    )
+    new_description: str = Field(
+        default="", description="For REVISE: the replacement description, if they gave one."
+    )
 
 
 class _Ideas(BaseModel):
@@ -62,7 +84,12 @@ _INTENT_SYSTEM = (
     "Classify what the operator wants from a YouTube automation pipeline. A long block of narrative "
     "prose is FROM_STORY even without an explicit instruction -- pasting a story IS the request. A "
     "short phrase naming a subject is MAKE_TOPIC. Questions about progress, runs, videos, costs or "
-    "quota are STATUS. For FROM_STORY copy the story text verbatim into `story`; never summarise it."
+    "quota are STATUS. For FROM_STORY copy the story text verbatim into `story`; never summarise it. "
+    "A finished video may be waiting for the operator's decision: 'show it to me' / 'let me see' is "
+    "REVIEW, 'upload it' / 'publish' / 'yes, send it' / 'looks good' is APPROVE, 'scrap it' / 'no, "
+    "cancel' is REJECT, and anything asking for a different title or description is REVISE. For "
+    "REVISE, put the replacement text in new_title/new_description only when the operator actually "
+    "dictated it -- leave them empty when they just said something was wrong with it."
 )
 
 
@@ -142,6 +169,66 @@ def _ideas_answer(db: Session) -> list[str]:
         return []
 
 
+def _pending_review(db: Session) -> dict | None:
+    """The oldest run parked at the approval gate, as a dashboard-style card, or None.
+
+    Oldest rather than newest on purpose: if two videos are waiting, "upload it" should clear the
+    queue in the order the operator saw them, not jump to whichever finished last.
+    """
+    waiting = list_runs(db, status=RunStatus.AWAITING_APPROVAL)
+    if not waiting:
+        return None
+    waiting.sort(key=lambda r: r.updated_at or r.created_at)
+    rows = _approval_rows(db, waiting[:1])
+    return rows[0] if rows else None
+
+
+def _review_text(card: dict) -> str:
+    """The spoken half of a review. The card itself carries the player and the buttons, so this
+    only says what a reviewer cannot see at a glance."""
+    parts = [f"**{card['title']}** is ready — have a look before it goes anywhere."]
+
+    compliance = card.get("compliance")
+    if compliance:
+        if not compliance.get("passed"):
+            reasons = ", ".join(compliance.get("blocking_reasons") or []) or "unspecified"
+            parts.append(f"⚠️ Compliance did **not** pass: {reasons}")
+        else:
+            bits = ["compliance passed"]
+            risk = compliance.get("copyright_risk_score")
+            if risk is not None:
+                bits.append(f"copyright risk {risk}")
+            if not compliance.get("av_sync_ok"):
+                bits.append("**audio/video out of sync**")
+            if not compliance.get("spec_check_ok"):
+                bits.append("**spec check failed**")
+            parts.append(" · ".join(bits))
+    else:
+        parts.append("I could not read the compliance result from the checkpoint for this one.")
+
+    if not card.get("render_url"):
+        parts.append(
+            "No rendered file is attached to this run, so there is nothing to play — worth "
+            "opening the full review before approving."
+        )
+
+    parts.append(
+        "Tell me **upload it** to publish, **change the title to …** to edit it first, or "
+        "**scrap it** to bin the run."
+    )
+    return "\n\n".join(parts)
+
+
+def _no_pending_reply(intent: str) -> ChatReply:
+    return ChatReply(
+        reply=(
+            "Nothing is waiting for a decision right now. When a video finishes I'll show it to "
+            "you here first, and it won't upload until you say so."
+        ),
+        intent=intent,
+    )
+
+
 @router.post("", response_model=ChatReply)
 @router.post("/", response_model=ChatReply)
 def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatReply:
@@ -167,6 +254,80 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatReply:
             "I couldn't reach the LLM for ideas just now."
         )
         return ChatReply(reply=reply, intent=intent, suggestions=ideas)
+
+    if intent == "REVIEW":
+        card = _pending_review(db)
+        if card is None:
+            return _no_pending_reply(intent)
+        return ChatReply(reply=_review_text(card), intent=intent, run_id=card["id"], review=card)
+
+    if intent == "APPROVE":
+        card = _pending_review(db)
+        if card is None:
+            return _no_pending_reply(intent)
+        _resume(card["id"], approved=True, notes=message)
+        return ChatReply(
+            reply=(
+                f"Publishing **{card['title']}** now — uploading to YouTube as "
+                f"**{get_settings().youtube_upload_visibility}**, then the thumbnail. "
+                "Ask me what's happening to watch it land."
+            ),
+            intent=intent,
+            run_id=card["id"],
+        )
+
+    if intent == "REJECT":
+        card = _pending_review(db)
+        if card is None:
+            return _no_pending_reply(intent)
+        _resume(card["id"], approved=False, notes=message)
+        return ChatReply(
+            reply=(
+                f"Scrapped **{card['title']}** — it will not be uploaded. The render stays on disk "
+                "in case you want it later."
+            ),
+            intent=intent,
+            run_id=card["id"],
+        )
+
+    if intent == "REVISE":
+        card = _pending_review(db)
+        if card is None:
+            return _no_pending_reply(intent)
+        new_title = (parsed.new_title or "").strip()
+        new_description = (parsed.new_description or "").strip()
+        if not new_title and not new_description:
+            # The model understood "the title is wrong" but has nothing to write. Asking is better
+            # than inventing a title the operator never chose for a video about to go public.
+            return ChatReply(
+                reply=(
+                    "Happy to change it — what should it say instead? The title now is "
+                    f"**{card['title']}**.\n\nGive me the exact words, like _change the title to "
+                    "Counting to Ten with Friendly Animals_."
+                ),
+                intent="HELP",
+                run_id=card["id"],
+                review=card,
+            )
+        # Editing a parked run in place is not wired up yet, and the half-built version was worse
+        # than nothing: writing the checkpoint destroyed the pending interrupt, which emptied the
+        # review packet, and the only way found to rebuild it re-entered the gate -- where a queued
+        # decision could carry the run straight to upload. Until the edit can be carried in the
+        # approval decision itself, say so plainly rather than risk an unasked-for publish.
+        wanted = new_title or new_description
+        return ChatReply(
+            reply=(
+                f"I can't edit **{card['title']}** in place yet — that path isn't finished, and the "
+                "unfinished version risked publishing the video instead of editing it.\n\n"
+                f"What you asked for: _{wanted}_\n\n"
+                "For now: **scrap it** and name the topic again with the wording you want, or "
+                "**upload it** as it stands and rename it on YouTube, which takes a few seconds "
+                "there and costs nothing here."
+            ),
+            intent="HELP",
+            run_id=card["id"],
+            review=card,
+        )
 
     if intent == "MAKE_TOPIC":
         topic = (parsed.topic or message)[:300]
@@ -222,3 +383,26 @@ def _enqueue(run_id: str) -> None:
 
     run_pipeline_task.delay(run_id)
     logger.info("chat.run_enqueued", run_id=run_id)
+
+
+def _resume(run_id: str, approved: bool, notes: str = "") -> None:
+    """Hands an approve/reject decision to the same Celery task the review dashboard uses, so a
+    chat decision and a dashboard click take an identical path through the graph."""
+    from worker.tasks import resume_pipeline_task
+
+    decision = {
+        "run_id": run_id,
+        "approved": approved,
+        "selected_thumbnail_index": 0,
+        "reviewer": "chat",
+        "notes": notes[:2_000],
+    }
+    resume_pipeline_task.delay(run_id, decision)
+    logger.info("chat.run_resumed", run_id=run_id, approved=approved)
+
+
+def _revise(run_id: str, title: str = "", description: str = "") -> None:
+    from worker.tasks import revise_metadata_task
+
+    revise_metadata_task.delay(run_id, {"title": title, "description": description})
+    logger.info("chat.run_revised", run_id=run_id, title=bool(title), description=bool(description))

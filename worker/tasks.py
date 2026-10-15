@@ -21,7 +21,8 @@ from db.crud import (
 )
 from graph.checkpointer import postgres_checkpointer
 from graph.feedback_graph import build_feedback_graph
-from graph.run import resume_run, start_run
+from graph.run import get_state as graph_get_state
+from graph.run import patch_state, resume_run, start_run
 from tools import cost as cost_tool
 from worker.celery_app import celery_app
 
@@ -123,6 +124,61 @@ def resume_pipeline_task(self, run_id: str, decision: dict) -> dict:
     except Exception as exc:
         logger.error("pipeline.resume.failed", run_id=run_id, error=str(exc))
         _mark_run_failed(db, run_id, exc)
+        raise self.retry(exc=exc)
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=30, name="worker.revise_metadata_task")
+def revise_metadata_task(self, run_id: str, changes: dict) -> dict:
+    """Edits the title/description of a run parked at the approval gate.
+
+    UNUSED and not reachable from the chat surface -- see the REVISE branch in api/routes/chat.py.
+    Kept because the cheap-edit idea is right (a title change should not cost a 20-minute
+    re-render), but the mechanism is not: graph.run.patch_state destroys the pending interrupt,
+    and re-entering the gate to rebuild it can consume a queued decision and publish. The edit
+    needs to travel in the ApprovalDecision instead, applied on resume, so the gate is passed
+    exactly once and only by a real decision.
+    """
+    db = SessionLocal()
+    try:
+        run = get_run(db, uuid.UUID(run_id))
+        if run is None:
+            raise ValueError(f"Run {run_id} not found")
+        if run.status != RunStatus.AWAITING_APPROVAL:
+            # Not an error worth retrying: the run moved on (approved elsewhere, or failed) and
+            # the edit no longer has anything to apply to.
+            logger.warning("pipeline.revise.not_awaiting", run_id=run_id, status=str(run.status))
+            return {"run_id": run_id, "applied": False, "reason": "run not awaiting approval"}
+        thread_id = run.langgraph_thread_id
+        db.commit()  # release the read transaction before postgres_checkpointer()'s DDL runs
+
+        with postgres_checkpointer() as checkpointer:
+            snapshot = graph_get_state(checkpointer, thread_id)
+            metadata = dict((getattr(snapshot, "values", None) or {}).get("metadata_output") or {})
+            if not metadata:
+                raise ValueError("no metadata_output in checkpoint state")
+
+            title = (changes.get("title") or "").strip()
+            description = (changes.get("description") or "").strip()
+            if title:
+                metadata["selected_title"] = title[:100]  # YouTube's hard title limit
+            if description:
+                metadata["description"] = description[:5000]
+            patch_state(checkpointer, thread_id, {"metadata_output": metadata})
+
+        logger.info(
+            "pipeline.revise.applied", run_id=run_id,
+            changed=sorted(k for k in ("title", "description") if changes.get(k)),
+        )
+        return {
+            "run_id": run_id,
+            "applied": True,
+            "title": metadata.get("selected_title"),
+            "description": metadata.get("description"),
+        }
+    except Exception as exc:
+        logger.error("pipeline.revise.failed", run_id=run_id, error=str(exc))
         raise self.retry(exc=exc)
     finally:
         db.close()

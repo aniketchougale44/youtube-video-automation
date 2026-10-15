@@ -72,3 +72,30 @@ def get_state(checkpointer, thread_id: str):
     app = build_publish_graph().compile(checkpointer=checkpointer)
     config = {"configurable": {"thread_id": thread_id}}
     return app.get_state(config)
+
+
+def patch_state(checkpointer, thread_id: str, values: dict) -> None:
+    """Writes `values` into a paused thread's channel state.
+
+    NOT currently safe to use on a thread parked at the approval gate, and nothing calls it on one.
+    Two observed problems, neither yet solved:
+
+    1. update_state() writes a new checkpoint and the pending interrupt does not survive it. The
+       task stays scheduled but its payload is gone, so the review packet reads back empty and the
+       dashboard card degrades to "compliance unreadable" with no title or thumbnails.
+    2. human_approval_node builds the review packet from state when it runs, so an edit applied
+       this way is not reflected in the card the operator is looking at.
+
+    DO NOT "fix" the lost packet by re-invoking the thread afterwards. invoke(None) resumes
+    whatever pending work the thread has, and if a decision is already waiting for that thread --
+    a queued resume_pipeline_task redelivered after a worker restart, for one -- the gate consumes
+    it and the run proceeds to upload. That is a publish nobody asked for in that moment. An
+    approval gate may only ever be passed by an explicit decision, never by a repair routine.
+
+    Only safe for state the still-pending nodes read. Patching something an already-executed node
+    produced (the render path, the voiceover) changes the record without changing the artifact.
+    """
+    app = build_publish_graph().compile(checkpointer=checkpointer)
+    config = {"configurable": {"thread_id": thread_id}}
+    app.update_state(config, values)
+    logger.info("run.patch_state", thread_id=thread_id, keys=sorted(values))
