@@ -1,11 +1,12 @@
 """Live operations dashboard: every run, its real-time pipeline stage, recent agent activity,
 and cost — plus the human-approval review flow (list runs awaiting approval, inspect the
 ApprovalPacket surfaced by the human_approval_node interrupt(), approve or reject)."""
+import itertools
 import json
 import os
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse, StreamingResponse
@@ -17,8 +18,8 @@ from agents.schemas.common import RunStatus
 from core.logging import code_version, get_logger
 from core.settings import get_settings
 from db.base import SessionLocal, get_db
-from db.crud import get_run, list_runs
-from db.models import AgentLog, Cost, Run, Video
+from db.crud import get_run, latest_strategy_weight_adjustments, list_runs
+from db.models import AgentLog, Cost, PerformanceSnapshot, Run, Video
 from graph.checkpointer import postgres_checkpointer
 from graph.run import get_state
 from tools import youtube as youtube_tool
@@ -31,6 +32,7 @@ templates = Jinja2Templates(directory="api/templates")
 
 logger = get_logger("api.dashboard")
 _CHANNEL_CACHE_KEY = "dashboard:channel_uploads"
+_AUTH_CACHE_KEY = "dashboard:youtube_auth"
 
 # Mirrors the node order wired in graph/builder.py — used only to place a run's live position on
 # the progress bar, not to drive any control flow.
@@ -323,6 +325,178 @@ def _build_snapshot(db: Session) -> dict:
     }
 
 
+# --------------------------------------------------------------------------- ops panels
+#
+# Everything below feeds /dashboard/ops. Each panel is assembled from rows that already exist --
+# costs, performance_snapshots, agent_logs, the Redis quota bucket, the OAuth token. Nothing is
+# estimated or extrapolated: a panel with no data says so rather than drawing a flat line, because
+# an operations screen that invents a number is worse than one that admits a gap.
+
+
+def _quota_panel() -> dict:
+    """Today's YouTube API budget. A full publish is ~2,050 units of the daily 10,000."""
+    try:
+        from tools import quota
+
+        limit = get_settings().youtube_daily_quota_units
+        remaining = quota.remaining_units()
+        return {
+            "limit": limit,
+            "remaining": remaining,
+            "used": max(0, limit - remaining),
+            "publishes_left": remaining // 2050,
+            "error": None,
+        }
+    except Exception as exc:
+        return {"limit": None, "remaining": None, "used": None, "publishes_left": None,
+                "error": f"{type(exc).__name__} -- is Redis running?"}
+
+
+def _youtube_auth_panel() -> dict:
+    """Whether the stored refresh token still works.
+
+    Worth its own panel: an expired token fails only at the upload node, ~20 minutes and a full
+    render into a run, and the error it raises there ("invalid_grant") does not obviously mean
+    "re-authorize". Checking costs one token refresh and no quota.
+    """
+    settings = get_settings()
+    if not settings.youtube_refresh_token:
+        return {"ok": False, "detail": "No YOUTUBE_REFRESH_TOKEN set."}
+
+    # Cached for 5 minutes. A failing refresh takes seconds to come back, and this panel sits on
+    # the first paint of the page -- without the cache the whole dashboard waits on Google.
+    cached = cache_get_json(_AUTH_CACHE_KEY)
+    if cached is not None:
+        return cached
+
+    try:
+        from google.auth.transport.requests import Request as GoogleRequest
+        from google.oauth2.credentials import Credentials
+
+        creds = Credentials(
+            None,
+            refresh_token=settings.youtube_refresh_token,
+            client_id=settings.youtube_client_id,
+            client_secret=settings.youtube_client_secret,
+            token_uri="https://oauth2.googleapis.com/token",
+        )
+        creds.refresh(GoogleRequest())
+        result = {"ok": True, "detail": "Refresh token valid."}
+    except Exception as exc:
+        detail = str(exc)
+        if "invalid_grant" in detail:
+            detail = "Token expired or revoked -- run scripts/youtube_oauth_setup.py."
+        result = {"ok": False, "detail": detail[:160]}
+    cache_set_json(_AUTH_CACHE_KEY, result, ttl_seconds=300)
+    return result
+
+
+def _spend_series(db: Session, days: int = 14) -> list[dict]:
+    """Daily measured spend. Only days that actually have cost rows are returned."""
+    rows = db.execute(
+        select(
+            func.date(Cost.created_at).label("day"),
+            func.sum(Cost.total_usd).label("total"),
+        )
+        .where(Cost.created_at >= datetime.now(UTC) - timedelta(days=days))
+        .group_by(func.date(Cost.created_at))
+        .order_by(func.date(Cost.created_at))
+    ).all()
+    return [{"day": str(r.day), "usd": round(float(r.total or 0), 4)} for r in rows]
+
+
+def _spend_by_provider(db: Session) -> list[dict]:
+    """Where the money goes, all-time, biggest first. Grouped by provider rather than stage:
+    the actionable question is which vendor to swap, not which node called it."""
+    rows = db.execute(
+        select(Cost.provider, func.sum(Cost.total_usd).label("total"))
+        .group_by(Cost.provider)
+        .order_by(func.sum(Cost.total_usd).desc())
+    ).all()
+    return [{"provider": r.provider or "unknown", "usd": round(float(r.total or 0), 4)} for r in rows]
+
+
+def _stage_timings(db: Session, limit_runs: int = 20) -> list[dict]:
+    """Mean wall-clock seconds per pipeline stage, from consecutive agent_log timestamps.
+
+    agent_logs record when a stage logged, not how long it took, so a stage's duration is inferred
+    as the gap to the next log in the same run. The last stage of a run has no successor and is
+    dropped rather than guessed, which is why `samples` is reported -- a stage with 1 sample is an
+    anecdote, not a timing.
+    """
+    recent_run_ids = [
+        r.id for r in db.execute(select(Run).order_by(Run.created_at.desc()).limit(limit_runs)).scalars()
+    ]
+    if not recent_run_ids:
+        return []
+
+    logs = db.execute(
+        select(AgentLog)
+        .where(AgentLog.run_id.in_(recent_run_ids))
+        .order_by(AgentLog.run_id, AgentLog.created_at)
+    ).scalars().all()
+
+    by_run: dict = {}
+    for log in logs:
+        by_run.setdefault(log.run_id, []).append(log)
+
+    totals: dict[str, list[float]] = {}
+    for entries in by_run.values():
+        for current, nxt in itertools.pairwise(entries):
+            if not current.stage or not current.created_at or not nxt.created_at:
+                continue
+            seconds = (nxt.created_at - current.created_at).total_seconds()
+            if 0 <= seconds < 3600:  # a gap longer than an hour is a parked run, not a stage
+                totals.setdefault(current.stage, []).append(seconds)
+
+    out = [
+        {"stage": stage, "mean_seconds": round(sum(v) / len(v), 2), "samples": len(v)}
+        for stage, v in totals.items()
+    ]
+    out.sort(key=lambda r: r["mean_seconds"], reverse=True)
+    return out
+
+
+def _performance_rows(db: Session, limit: int = 12) -> list[dict]:
+    """Newest performance snapshot per window, joined to the video it describes."""
+    rows = db.execute(
+        select(PerformanceSnapshot, Video)
+        .join(Video, Video.id == PerformanceSnapshot.video_id)
+        .order_by(PerformanceSnapshot.captured_at.desc())
+        .limit(limit)
+    ).all()
+    return [
+        {
+            "title": v.title or "(untitled)",
+            "youtube_video_id": v.youtube_video_id,
+            "window": s.window,
+            "views": s.views,
+            "impressions": s.impressions,
+            "ctr": round(float(s.ctr or 0), 2),
+            "retention_pct": round(float(s.retention_pct or 0), 1),
+            "likes": s.likes,
+            "comments": s.comments,
+            "captured_at": s.captured_at.isoformat() if s.captured_at else None,
+        }
+        for s, v in rows
+    ]
+
+
+def _build_ops(db: Session) -> dict:
+    return {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "quota": _quota_panel(),
+        "youtube_auth": _youtube_auth_panel(),
+        "approval_gate_on": get_settings().require_human_approval,
+        "upload_visibility": get_settings().youtube_upload_visibility,
+        "spend_series": _spend_series(db),
+        "spend_by_provider": _spend_by_provider(db),
+        "stage_timings": _stage_timings(db),
+        "performance": _performance_rows(db),
+        "learned_weights": latest_strategy_weight_adjustments(db),
+    }
+
+
 @router.get("/")
 def dashboard_index(request: Request, db: Session = Depends(get_db)):
     # The approval queue, run table, and activity feed all render client-side from this one
@@ -398,6 +572,18 @@ def dashboard_snapshot(db: Session = Depends(get_db)):
 # Registered after the literal paths above on purpose: run_id is typed uuid.UUID, so a request for
 # /dashboard/studio would match this route's shape and fail validation with a 422 rather than
 # falling through to it.
+@router.get("/ops")
+def ops(request: Request):
+    return templates.TemplateResponse(request, "ops.html", {})
+
+
+@router.get("/ops/snapshot")
+def ops_snapshot(db: Session = Depends(get_db)):
+    """Separate from /dashboard/snapshot on purpose: this one makes a live token-refresh call to
+    Google, so it is polled far less often than the 5s run/stage poll."""
+    return _build_ops(db)
+
+
 @router.get("/{run_id}")
 def dashboard_review(request: Request, run_id: uuid.UUID, db: Session = Depends(get_db)):
     run = get_run(db, run_id)

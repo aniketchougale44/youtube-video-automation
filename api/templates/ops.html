@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>AutoTube Ops</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap">
+<style>
+  /* Tokens shared with studio.html so the two screens read as one product. --data is the single
+     series hue for every chart on this page; it is not decorative and is not swapped per chart.
+     It was picked by running the dataviz validator against this surface rather than by eye:
+     chroma 0.1+ (does not read gray as a mark), contrast >= 3:1 on the panel background. */
+  :root{
+    --bg:#0c0c0c; --box:#111; --hairline:rgba(255,255,255,.065);
+    --heading:#fafafa; --body:#c8c8c8; --muted:#8b8b8d;
+    --chip-fill:rgba(255,255,255,.028);
+    --grad:linear-gradient(90deg,#ffe776 0%,#ffd400 22%,#ffd000 40%,#c9c93c 60%,#86ca8a 76%,#78d0cd 100%);
+    --data:#0891b2; --data-hi:#22d3ee;
+    --good:#23d92c; --warn:#ffd000; --bad:#ff6b5e;
+  }
+  *{box-sizing:border-box}
+  html{font-size:16px}
+  body{margin:0;background:var(--bg);color:#fff;font-family:"Inter","Helvetica Neue",Arial,system-ui,sans-serif;
+       -webkit-font-smoothing:antialiased;min-height:100dvh}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+  .top{display:flex;align-items:center;gap:1rem;padding:clamp(14px,1.5vw,22px) clamp(16px,1.7vw,28px);
+       border-bottom:1px solid var(--hairline);position:sticky;top:0;background:rgba(12,12,12,.86);
+       backdrop-filter:blur(14px);z-index:20;flex-wrap:wrap}
+  .brand{display:flex;align-items:center;gap:.65rem;font-weight:500}
+  .brand svg{width:30px;height:30px}
+  .brand b{font-weight:600}
+  .tabs{display:flex;gap:.4rem;margin-left:.9rem}
+  .tab{font-size:.84rem;color:var(--body);text-decoration:none;padding:.38rem .72rem;border-radius:8px;
+       border:1px solid transparent}
+  .tab:hover{background:rgba(255,255,255,.05);color:#fff}
+  .tab.on{background:var(--chip-fill);border-color:var(--hairline);color:#fff}
+  .stamp{margin-left:auto;font-size:.76rem;color:var(--muted)}
+
+  .wrap{padding:clamp(14px,1.6vw,24px);max-width:1520px;margin:0 auto;
+        display:flex;flex-direction:column;gap:clamp(14px,1.5vw,20px)}
+  .card{background:linear-gradient(180deg,rgba(255,255,255,.028),rgba(255,255,255,0) 42%),var(--box);
+        border:1px solid var(--hairline);border-radius:clamp(14px,1.3vw,18px);
+        box-shadow:0 2px 40px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.04)}
+  .card-h{padding:clamp(13px,1.2vw,16px) clamp(15px,1.4vw,20px);border-bottom:1px solid var(--hairline);
+          display:flex;align-items:baseline;gap:.6rem;flex-wrap:wrap}
+  .card-h h2{margin:0;font-size:.76rem;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+  .card-h .sub{font-size:.76rem;color:var(--muted)}
+  .card-b{padding:clamp(14px,1.4vw,20px)}
+
+  .grid{display:grid;gap:clamp(14px,1.5vw,20px)}
+  .g4{grid-template-columns:repeat(4,minmax(0,1fr))}
+  .g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+  @media (max-width:1040px){.g4{grid-template-columns:repeat(2,minmax(0,1fr))}.g2{grid-template-columns:1fr}}
+  @media (max-width:620px){.g4{grid-template-columns:1fr}}
+
+  /* A stat tile is the right form when the answer is one number; no plot, so no hover layer. */
+  .tile .n{font-size:clamp(1.6rem,2.6vw,2.1rem);font-weight:600;color:var(--heading);line-height:1.1;
+           letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+  .tile .lbl{font-size:.78rem;color:var(--muted);margin-top:.3rem}
+  .meter{height:6px;border-radius:999px;background:#1e1e1e;overflow:hidden;margin-top:.7rem}
+  .meter i{display:block;height:100%;border-radius:999px;background:var(--data);transition:width .5s ease}
+
+  /* Status never rides on colour alone: every state ships an icon and a word. */
+  .state{display:inline-flex;align-items:center;gap:.4rem;font-size:.82rem;font-weight:500}
+  .state.ok{color:var(--good)} .state.warn{color:var(--warn)} .state.bad{color:var(--bad)}
+  .state.off{color:var(--muted)}
+  .state svg{width:14px;height:14px;flex:0 0 auto}
+  .detail{font-size:.79rem;color:var(--body);margin-top:.45rem;line-height:1.5}
+  .detail code{background:rgba(255,255,255,.07);padding:.1em .38em;border-radius:5px;font-size:.92em}
+
+  .chart{width:100%;display:block;overflow:visible}
+  .chart .track{fill:rgba(255,255,255,.035)}
+  .chart .bar{fill:var(--data);transition:fill .15s}
+  .chart .row:hover .bar{fill:var(--data-hi)}
+  .chart .row:hover .hit{fill:rgba(255,255,255,.035)}
+  .chart .hit{fill:transparent;cursor:default}
+  .chart text{font-size:12px;fill:var(--body);font-family:inherit}
+  .chart .val{fill:var(--heading);font-variant-numeric:tabular-nums;font-weight:500}
+
+  table{width:100%;border-collapse:collapse;font-size:.85rem}
+  th{text-align:left;font-weight:500;color:var(--muted);font-size:.73rem;letter-spacing:.07em;
+     text-transform:uppercase;padding:0 .6rem .6rem 0;border-bottom:1px solid var(--hairline);white-space:nowrap}
+  td{padding:.6rem .6rem .6rem 0;border-bottom:1px solid var(--hairline);color:var(--body);vertical-align:top}
+  tr:last-child td{border-bottom:0}
+  td.num{text-align:right;font-variant-numeric:tabular-nums;color:var(--heading);padding-right:0}
+  th.num{text-align:right;padding-right:0}
+  td a{color:#78d0cd;text-decoration:none} td a:hover{text-decoration:underline}
+  .ttl{color:var(--heading);font-weight:500}
+  .win{display:inline-block;font-size:.72rem;color:var(--muted);border:1px solid var(--hairline);
+       border-radius:999px;padding:.08rem .45rem;margin-left:.4rem}
+
+  .empty{color:var(--muted);font-size:.86rem;line-height:1.6;margin:0}
+  .kv{display:flex;justify-content:space-between;gap:1rem;padding:.45rem 0;border-bottom:1px solid var(--hairline);font-size:.85rem}
+  .kv:last-child{border-bottom:0}
+  .kv span:first-child{color:var(--muted)}
+  .kv span:last-child{color:var(--heading);font-weight:500;font-variant-numeric:tabular-nums}
+
+  #tip{position:fixed;pointer-events:none;opacity:0;transform:translate(-50%,-115%);
+       background:#1c1c1c;border:1px solid rgba(255,255,255,.14);border-radius:9px;padding:.45rem .6rem;
+       font-size:.79rem;color:#efefef;white-space:nowrap;z-index:60;transition:opacity .12s;
+       box-shadow:0 6px 24px rgba(0,0,0,.6)}
+  #tip b{color:#fff;font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">
+    <svg viewBox="0 0 52 52" aria-hidden="true"><g class="rays" stroke="#f4f4f4" stroke-width="1.4" stroke-linecap="round"></g><circle cx="26" cy="26" r="7.4" fill="#fbfbfb"/></svg>
+    <span>AutoTube <b>Ops</b></span>
+  </div>
+  <nav class="tabs">
+    <a class="tab" href="/dashboard/studio">Studio</a>
+    <a class="tab on" href="/dashboard/ops" aria-current="page">Ops</a>
+    <a class="tab" href="/dashboard/">Runs</a>
+  </nav>
+  <span class="stamp" id="stamp">loading…</span>
+</header>
+
+<main class="wrap">
+
+  <section class="grid g4">
+    <div class="card tile"><div class="card-b">
+      <div class="n" id="quota-n">—</div>
+      <div class="lbl">YouTube quota left today</div>
+      <div class="meter"><i id="quota-bar" style="width:0%"></i></div>
+      <div class="detail" id="quota-d">—</div>
+    </div></div>
+
+    <div class="card tile"><div class="card-b">
+      <div class="n" id="auth-n">—</div>
+      <div class="lbl">Upload authorisation</div>
+      <div class="detail" id="auth-d">—</div>
+    </div></div>
+
+    <div class="card tile"><div class="card-b">
+      <div class="n" id="gate-n">—</div>
+      <div class="lbl">Approval gate</div>
+      <div class="detail" id="gate-d">—</div>
+    </div></div>
+
+    <div class="card tile"><div class="card-b">
+      <div class="n" id="spend-n">—</div>
+      <div class="lbl">Measured spend, all time</div>
+      <div class="detail" id="spend-d">—</div>
+    </div></div>
+  </section>
+
+  <section class="grid g2">
+    <div class="card">
+      <div class="card-h"><h2>Spend by provider</h2><span class="sub">all time, USD</span></div>
+      <div class="card-b" id="provider"><p class="empty">Loading…</p></div>
+    </div>
+    <div class="card">
+      <div class="card-h"><h2>Slowest stages</h2><span class="sub">mean seconds, last 20 runs</span></div>
+      <div class="card-b" id="stages"><p class="empty">Loading…</p></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-h"><h2>Published performance</h2><span class="sub">newest snapshot per video</span></div>
+    <div class="card-b" id="perf"><p class="empty">Loading…</p></div>
+  </section>
+
+  <section class="grid g2">
+    <div class="card">
+      <div class="card-h"><h2>Recent runs</h2></div>
+      <div class="card-b" id="runs"><p class="empty">Loading…</p></div>
+    </div>
+    <div class="card">
+      <div class="card-h"><h2>What the pipeline has learned</h2><span class="sub">strategy weights from performance</span></div>
+      <div class="card-b" id="weights"><p class="empty">Loading…</p></div>
+    </div>
+  </section>
+</main>
+
+<div id="tip" role="status" aria-live="polite"></div>
+
+<script>
+(function(){ // logo rays, generated rather than shipped as an asset
+  const g=document.querySelector('.rays'); if(!g) return;
+  for(let i=0;i<24;i++){
+    const a=-Math.PI/2 + i*(Math.PI*2/24);
+    const l=document.createElementNS('http://www.w3.org/2000/svg','line');
+    l.setAttribute('x1',26+10.4*Math.cos(a)); l.setAttribute('y1',26+10.4*Math.sin(a));
+    l.setAttribute('x2',26+22.6*Math.cos(a)); l.setAttribute('y2',26+22.6*Math.sin(a));
+    g.appendChild(l);
+  }
+})();
+
+const $=s=>document.querySelector(s);
+const esc=t=>String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const tip=$('#tip');
+
+const ICON={
+  ok:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 4.5L6 12l-3.5-3.5"/></svg>',
+  warn:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8l6.2 11.4H1.8z"/><path d="M8 6.4v3.2"/><path d="M8 11.6h.01"/></svg>',
+  bad:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.4"/><path d="M10.2 5.8L5.8 10.2M5.8 5.8l4.4 4.4"/></svg>',
+  off:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.4"/><path d="M5.2 8h5.6"/></svg>',
+  run:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="8" cy="8" r="6.4" opacity=".35"/><path d="M8 1.6a6.4 6.4 0 0 1 6.4 6.4"/></svg>',
+};
+const state=(cls,label)=>`<span class="state ${cls}">${ICON[cls]}${esc(label)}</span>`;
+
+function showTip(e,html){ tip.innerHTML=html; tip.style.opacity='1';
+  tip.style.left=e.clientX+'px'; tip.style.top=e.clientY+'px'; }
+function hideTip(){ tip.style.opacity='0'; }
+
+// Horizontal bars: the label is text, the length is the measure, and the value is written at the
+// end of every bar. One series, so no legend -- the panel title names it. The printed values are
+// also the table view: nothing here is readable only as a length.
+function barChart(rows, fmt, tipFmt){
+  if(!rows.length) return '<p class="empty">No data recorded yet.</p>';
+  const ROW=30, GAP=2, PAD_L=136, PAD_R=58, W=560;
+  const max=Math.max(...rows.map(r=>r.value)) || 1;
+  const h=rows.length*ROW;
+  const body=rows.map((r,i)=>{
+    const y=i*ROW, bh=ROW-GAP*2, w=Math.max(2,(r.value/max)*(W-PAD_L-PAD_R));
+    return `<g class="row" data-tip="${esc(tipFmt(r))}">
+      <rect class="hit" x="0" y="${y}" width="${W}" height="${ROW}" rx="5"></rect>
+      <text x="${PAD_L-10}" y="${y+ROW/2+4}" text-anchor="end">${esc(r.label)}</text>
+      <rect class="track" x="${PAD_L}" y="${y+GAP}" width="${W-PAD_L-PAD_R}" height="${bh}" rx="4"></rect>
+      <rect class="bar" x="${PAD_L}" y="${y+GAP}" width="${w}" height="${bh}" rx="4"></rect>
+      <text class="val" x="${PAD_L+w+8}" y="${y+ROW/2+4}">${esc(fmt(r.value))}</text>
+    </g>`;
+  }).join('');
+  return `<svg class="chart" viewBox="0 0 ${W} ${h}" role="img" preserveAspectRatio="xMinYMin meet">${body}</svg>`;
+}
+
+function wireTips(root){
+  root.querySelectorAll('.row').forEach(g=>{
+    g.addEventListener('mousemove',e=>showTip(e,g.dataset.tip));
+    g.addEventListener('mouseleave',hideTip);
+  });
+}
+
+const money=v=>'$'+(v<0.01&&v>0 ? v.toFixed(4) : v.toFixed(2));
+const secs=v=>v>=60 ? (v/60).toFixed(1)+'m' : v.toFixed(1)+'s';
+
+async function loadOps(){
+  let d;
+  try{
+    const r=await fetch('/dashboard/ops/snapshot'); if(!r.ok) throw new Error('HTTP '+r.status);
+    d=await r.json();
+  }catch(e){
+    $('#stamp').textContent='ops data unreachable — '+e.message; return;
+  }
+  $('#stamp').textContent='updated '+new Date(d.generated_at).toLocaleTimeString();
+
+  // --- quota
+  const q=d.quota;
+  if(q.error){
+    $('#quota-n').textContent='—'; $('#quota-d').innerHTML=state('warn',q.error);
+  }else{
+    $('#quota-n').textContent=q.remaining.toLocaleString();
+    $('#quota-bar').style.width=(100*q.remaining/q.limit).toFixed(1)+'%';
+    $('#quota-d').innerHTML=`${q.used.toLocaleString()} of ${q.limit.toLocaleString()} used · about <b>${q.publishes_left}</b> full publishes left (~2,050 units each)`;
+  }
+
+  // --- auth
+  const a=d.youtube_auth;
+  $('#auth-n').innerHTML = a.ok ? state('ok','Valid') : state('bad','Broken');
+  $('#auth-d').textContent=a.detail;
+
+  // --- gate
+  $('#gate-n').innerHTML = d.approval_gate_on ? state('ok','On') : state('warn','Off');
+  $('#gate-d').innerHTML = d.approval_gate_on
+    ? `Finished videos wait for you in the <a href="/dashboard/studio" style="color:#78d0cd">studio chat</a>. Uploads go out <code>${esc(d.upload_visibility)}</code>.`
+    : `Finished runs publish straight to YouTube as <code>${esc(d.upload_visibility)}</code> with no review.`;
+
+  // --- spend
+  const total=(d.spend_by_provider||[]).reduce((s,r)=>s+r.usd,0);
+  $('#spend-n').textContent=money(total);
+  $('#spend-d').textContent=(d.spend_series||[]).length
+    ? `Across ${d.spend_series.length} day${d.spend_series.length===1?'':'s'} with recorded cost rows.`
+    : 'No cost rows recorded yet.';
+
+  // --- charts
+  const prov=(d.spend_by_provider||[]).map(r=>({label:r.provider,value:r.usd}));
+  $('#provider').innerHTML=barChart(prov,money,r=>`<b>${esc(r.label)}</b> — ${money(r.value)}`);
+  wireTips($('#provider'));
+
+  // A stage timed from one run is an anecdote; the sample count travels with every bar.
+  const st=(d.stage_timings||[]).slice(0,10).map(r=>({label:r.stage.replace(/_/g,' '),value:r.mean_seconds,n:r.samples}));
+  $('#stages').innerHTML=barChart(st,secs,r=>`<b>${esc(r.label)}</b> — ${secs(r.value)} mean over ${r.n} run${r.n===1?'':'s'}`);
+  wireTips($('#stages'));
+
+  // --- performance
+  const p=d.performance||[];
+  $('#perf').innerHTML = p.length ? `<table>
+    <thead><tr><th>Video</th><th class="num">Views</th><th class="num">Impressions</th><th class="num">CTR</th><th class="num">Retention</th><th class="num">Likes</th></tr></thead>
+    <tbody>${p.map(v=>`<tr>
+      <td><span class="ttl">${esc(v.title)}</span><span class="win">${esc(v.window)}</span>${v.youtube_video_id?`<br><a href="https://youtube.com/watch?v=${esc(v.youtube_video_id)}" target="_blank" rel="noopener">watch →</a>`:''}</td>
+      <td class="num">${v.views.toLocaleString()}</td>
+      <td class="num">${v.impressions.toLocaleString()}</td>
+      <td class="num">${v.ctr}%</td>
+      <td class="num">${v.retention_pct}%</td>
+      <td class="num">${v.likes.toLocaleString()}</td>
+    </tr>`).join('')}</tbody></table>`
+    : '<p class="empty">No performance snapshots yet. These are captured 24 hours and 7 days after a video publishes.</p>';
+
+  // --- learned weights
+  const w=d.learned_weights||{};
+  const keys=Object.keys(w);
+  $('#weights').innerHTML = keys.length
+    ? keys.map(k=>`<div class="kv"><span>${esc(k.replace(/_/g,' '))}</span><span>${w[k]>0?'+':''}${w[k]}</span></div>`).join('')
+      + '<p class="empty" style="margin-top:.8rem">Nudges the strategy agent applies to the next run, learned from how published videos actually performed.</p>'
+    : '<p class="empty">Nothing learned yet — this fills in once published videos have performance snapshots to compare.</p>';
+}
+
+async function loadRuns(){
+  try{
+    const r=await fetch('/dashboard/snapshot'); if(!r.ok) throw new Error('HTTP '+r.status);
+    const s=await r.json(), runs=(s.runs||[]).slice(0,8);
+    if(!runs.length){ $('#runs').innerHTML='<p class="empty">No runs yet.</p>'; return; }
+    // A rejected run is a decision carried out, not a success and not a fault -- it gets the
+    // neutral mark. Defaulting unknown states to "ok" once put a green tick beside "rejected".
+    const MARK={published:'ok', failed:'bad', escalated:'bad', awaiting_approval:'warn',
+                rejected:'off', running:'run', pending:'run'};
+    const cls=st=>MARK[st]||'off';
+    const word=st=>String(st).replace(/_/g,' ');
+    $('#runs').innerHTML=`<table>
+      <thead><tr><th>Topic</th><th>Status</th><th class="num">Stage</th><th class="num">Cost</th></tr></thead>
+      <tbody>${runs.map(x=>`<tr>
+        <td><span class="ttl">${esc(String(x.topic||'(untitled)').slice(0,46))}</span>${x.youtube_url?`<br><a href="${esc(x.youtube_url)}" target="_blank" rel="noopener">watch →</a>`:''}</td>
+        <td>${state(cls(x.status),word(x.status))}</td>
+        <td class="num">${x.progress||0}/${x.progress_total||0}</td>
+        <td class="num">${money(x.cost_usd||0)}</td>
+      </tr>`).join('')}</tbody></table>`;
+  }catch(e){
+    $('#runs').innerHTML=`<p class="empty">Couldn't load runs — ${esc(e.message)}</p>`;
+  }
+}
+
+loadRuns(); setInterval(loadRuns, 5000);
+// Polled far less often than the runs table: this one makes a live token-refresh call to Google.
+loadOps(); setInterval(loadOps, 60000);
+</script>
+</body>
+</html>

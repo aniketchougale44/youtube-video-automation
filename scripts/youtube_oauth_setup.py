@@ -52,17 +52,31 @@ def main() -> None:
     print("Opening your browser — sign in and approve access to your YouTube channel...")
     credentials = flow.run_local_server(port=0)
 
-    youtube = build("youtube", "v3", credentials=credentials, cache_discovery=False)
-    channel = youtube.channels().list(part="id,snippet", mine=True).execute()
-    items = channel.get("items", [])
-    channel_id = items[0]["id"] if items else ""
-    channel_title = items[0]["snippet"]["title"] if items else "(unknown)"
-
+    # Save the token the moment it exists, before anything that can fail.
+    #
+    # This used to run after the channels.list() lookup below, and a timeout reaching
+    # googleapis.com threw away a sign-in that had already succeeded. The refresh token is handed
+    # over exactly once, so losing it here costs the whole browser approval again. Nothing
+    # fallible belongs between the approval and this line.
     set_key(str(ENV_PATH), "YOUTUBE_REFRESH_TOKEN", credentials.refresh_token)
-    set_key(str(ENV_PATH), "YOUTUBE_CHANNEL_ID", channel_id)
+    print("YOUTUBE_REFRESH_TOKEN written to .env.")
 
-    print(f"\nAuthorized for channel: {channel_title} ({channel_id})")
-    print("YOUTUBE_REFRESH_TOKEN and YOUTUBE_CHANNEL_ID written to .env. Restart the worker to pick them up.")
+    # The channel id is a convenience, not part of authorizing: it is already in .env from the
+    # last run and does not change. A failure here must not look like a failed authorization.
+    try:
+        youtube = build("youtube", "v3", credentials=credentials, cache_discovery=False)
+        channel = youtube.channels().list(part="id,snippet", mine=True).execute()
+        items = channel.get("items", [])
+        channel_id = items[0]["id"] if items else ""
+        channel_title = items[0]["snippet"]["title"] if items else "(unknown)"
+        if channel_id:
+            set_key(str(ENV_PATH), "YOUTUBE_CHANNEL_ID", channel_id)
+        print(f"\nAuthorized for channel: {channel_title} ({channel_id})")
+    except Exception as exc:
+        print(f"\nCouldn't look up the channel name ({type(exc).__name__}: {exc}).")
+        print("That does NOT affect the token — it is saved. YOUTUBE_CHANNEL_ID is unchanged.")
+
+    print("Restart the worker to pick it up.")
 
 
 if __name__ == "__main__":
