@@ -164,6 +164,18 @@ def callback(
     user: User = Depends(current_user),
 ):
     if error:
+        # access_denied has two quite different causes and one unhelpful name. Usually the
+        # consent screen is still in Testing, where Google admits only accounts on the test-user
+        # list -- it blocks on its own page without redirecting here, but comes back this way
+        # when the user cancels, or after being bounced. Saying "access_denied" alone leaves
+        # someone looking at their client id and redirect URI, neither of which is the problem.
+        if error == "access_denied":
+            return _back(
+                "Google refused the authorisation. Usually this means your OAuth consent screen "
+                "is still in Testing: open Google Auth Platform → Audience and either press "
+                "Publish app (recommended — Testing also expires the connection after 7 days), "
+                "or add your Google account under Test users. Then try again."
+            )
         return _back(f"Google returned: {error}")
     if not code:
         return _back("Google did not return an authorisation code.")
