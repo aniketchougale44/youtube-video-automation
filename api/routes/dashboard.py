@@ -357,13 +357,19 @@ def _owned_runs(user_id):
     return Cost.run_id.in_(select(Run.id).where(Run.user_id == user_id).scalar_subquery())
 
 
-def _quota_panel() -> dict:
-    """Today's YouTube API budget. A full publish is ~2,050 units of the daily 10,000."""
+def _quota_panel(client_id: str = "") -> dict:
+    """Today's YouTube API budget for THIS account's Google Cloud project.
+
+    A full publish is ~2,050 units of the daily 10,000. The budget is per project, and each user
+    brings their own, so a signed-in user's panel must read their own bucket -- showing the
+    deployment's counter here would tell everyone the same number and none of them the truth.
+    """
     try:
         from tools import quota
 
         limit = get_settings().youtube_daily_quota_units
-        remaining = quota.remaining_units()
+        scope = quota.scope_for_client_id(client_id) if client_id else None
+        remaining = quota.remaining_units(scope)
         return {
             "limit": limit,
             "remaining": remaining,
@@ -376,20 +382,57 @@ def _quota_panel() -> dict:
                 "error": f"{type(exc).__name__} -- is Redis running?"}
 
 
-def _youtube_auth_panel() -> dict:
-    """Whether the stored refresh token still works.
+def _user_client_id(db: Session, user_id) -> str:
+    """The signed-in account's own OAuth client id, decrypted, or "" when none is connected."""
+    if user_id is None:
+        return ""
+    from core.crypto import decrypt_secret
+    from db.models import UserCredential
+
+    credential = db.execute(
+        select(UserCredential).where(UserCredential.user_id == user_id)
+    ).scalars().first()
+    return decrypt_secret(credential.google_client_id) if credential else ""
+
+
+def _youtube_auth_panel(db: Session = None, user_id=None) -> dict:
+    """Whether this account's stored refresh token still works.
 
     Worth its own panel: an expired token fails only at the upload node, ~20 minutes and a full
     render into a run, and the error it raises there ("invalid_grant") does not obviously mean
-    "re-authorize". Checking costs one token refresh and no quota.
-    """
-    settings = get_settings()
-    if not settings.youtube_refresh_token:
-        return {"ok": False, "detail": "No YOUTUBE_REFRESH_TOKEN set."}
+    "reconnect your channel". Checking costs one token refresh and no quota.
 
-    # Cached for 5 minutes. A failing refresh takes seconds to come back, and this panel sits on
-    # the first paint of the page -- without the cache the whole dashboard waits on Google.
-    cached = cache_get_json(_AUTH_CACHE_KEY)
+    A signed-in user is checked against their OWN connected channel. Reporting the deployment's
+    .env token to every account would tell one user their channel is fine while it is broken, and
+    another that theirs is broken while it works.
+    """
+    if user_id is not None and db is not None:
+        from core.crypto import decrypt_secret
+        from db.models import UserCredential
+
+        credential = db.execute(
+            select(UserCredential).where(UserCredential.user_id == user_id)
+        ).scalars().first()
+        client_id = decrypt_secret(credential.google_client_id) if credential else ""
+        client_secret = decrypt_secret(credential.google_client_secret) if credential else ""
+        refresh_token = decrypt_secret(credential.youtube_refresh_token) if credential else ""
+        if not refresh_token:
+            return {"ok": False, "detail": "No channel connected yet — connect one in onboarding."}
+        fix_hint = "Token expired or revoked — reconnect your channel in onboarding."
+        cache_key = f"{_AUTH_CACHE_KEY}:{user_id}"
+    else:
+        settings = get_settings()
+        client_id = settings.youtube_client_id
+        client_secret = settings.youtube_client_secret
+        refresh_token = settings.youtube_refresh_token
+        if not refresh_token:
+            return {"ok": False, "detail": "No YOUTUBE_REFRESH_TOKEN set."}
+        fix_hint = "Token expired or revoked -- run scripts/youtube_oauth_setup.py."
+        cache_key = _AUTH_CACHE_KEY
+
+    # Cached for 5 minutes, per account. A failing refresh takes seconds to come back, and this
+    # panel sits on the first paint of the page -- without the cache the dashboard waits on Google.
+    cached = cache_get_json(cache_key)
     if cached is not None:
         return cached
 
@@ -399,9 +442,9 @@ def _youtube_auth_panel() -> dict:
 
         creds = Credentials(
             None,
-            refresh_token=settings.youtube_refresh_token,
-            client_id=settings.youtube_client_id,
-            client_secret=settings.youtube_client_secret,
+            refresh_token=refresh_token,
+            client_id=client_id,
+            client_secret=client_secret,
             token_uri="https://oauth2.googleapis.com/token",
         )
         creds.refresh(GoogleRequest())
@@ -409,9 +452,9 @@ def _youtube_auth_panel() -> dict:
     except Exception as exc:
         detail = str(exc)
         if "invalid_grant" in detail:
-            detail = "Token expired or revoked -- run scripts/youtube_oauth_setup.py."
+            detail = fix_hint
         result = {"ok": False, "detail": detail[:160]}
-    cache_set_json(_AUTH_CACHE_KEY, result, ttl_seconds=300)
+    cache_set_json(cache_key, result, ttl_seconds=300)
     return result
 
 
@@ -521,8 +564,8 @@ def _build_ops(db: Session, user_id=None) -> dict:
     is their own connected channel."""
     return {
         "generated_at": datetime.now(UTC).isoformat(),
-        "quota": _quota_panel(),
-        "youtube_auth": _youtube_auth_panel(),
+        "quota": _quota_panel(_user_client_id(db, user_id)),
+        "youtube_auth": _youtube_auth_panel(db, user_id),
         "approval_gate_on": get_settings().require_human_approval,
         "upload_visibility": get_settings().youtube_upload_visibility,
         "spend_series": _spend_series(db, user_id=user_id),

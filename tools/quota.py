@@ -1,6 +1,22 @@
 """YouTube Data API v3 quota tracker — a Redis-backed daily token bucket (10,000 units/day
 default). Every tools.youtube call consumes from this before firing; callers must catch
-QuotaExceededError and defer/queue rather than fail the whole run."""
+QuotaExceededError and defer/queue rather than fail the whole run.
+
+The bucket is keyed by GOOGLE CLOUD PROJECT, because that is the thing Google actually meters.
+Each user brings their own OAuth client, so each has their own project and their own full
+10,000 units a day; a single shared counter would have let one account's upload exhaust
+everybody's budget, which would have quietly undone the whole reason for per-user credentials.
+
+The project is read from the OAuth client id, whose leading digits are the project number:
+"1234567890-abc123.apps.googleusercontent.com" -> project 1234567890. Deriving it rather than
+storing a separate id means two users who really do share one Google project correctly share one
+bucket, which is what Google will do to them regardless of what this file thinks.
+
+Reads made with an API key (trend research, competitor search) bill the DEPLOYMENT's project,
+not the signed-in user's, because that is whose key is on the request. Those call sites pass
+scope=DEPLOYMENT explicitly. Getting this backwards would charge a user for quota Google took
+from the operator, and leave the operator's own budget looking untouched until it ran out.
+"""
 import functools
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -44,38 +60,67 @@ def _redis() -> redis.Redis:
     return _redis_client
 
 
-def _today_key() -> str:
-    return f"youtube_quota:{datetime.now(UTC):%Y-%m-%d}"
+DEPLOYMENT = "deployment"
 
 
-def remaining_units() -> int:
-    used = int(_redis().get(_today_key()) or 0)
+def scope_for_client_id(client_id: str) -> str:
+    """The Google Cloud project a client id belongs to.
+
+    Falls back to a hash of the whole id rather than to a shared bucket: an unrecognised format
+    should give that credential its own counter, not silently pool it with everyone else's.
+    """
+    if not client_id:
+        return DEPLOYMENT
+    project = client_id.split("-", 1)[0]
+    if project.isdigit():
+        return project
+    import hashlib
+
+    return "c" + hashlib.sha256(client_id.encode("utf-8")).hexdigest()[:16]
+
+
+def _active_scope() -> str:
+    """The project that will be billed for the call being made right now: whichever account
+    tools.youtube is acting as, or the deployment when nothing is acting."""
+    from tools import youtube as youtube_tool  # late: tools.youtube imports this module
+
+    return scope_for_client_id(youtube_tool._oauth_credentials().get("client_id") or "")
+
+
+def _today_key(scope: str | None = None) -> str:
+    return f"youtube_quota:{scope or _active_scope()}:{datetime.now(UTC):%Y-%m-%d}"
+
+
+def remaining_units(scope: str | None = None) -> int:
+    used = int(_redis().get(_today_key(scope)) or 0)
     return max(0, get_settings().youtube_daily_quota_units - used)
 
 
-def can_afford(operation: str) -> bool:
-    return remaining_units() >= UNIT_COSTS.get(operation, 1)
+def can_afford(operation: str, scope: str | None = None) -> bool:
+    return remaining_units(scope) >= UNIT_COSTS.get(operation, 1)
 
 
-def consume(operation: str) -> int:
+def consume(operation: str, scope: str | None = None) -> int:
     """Reserves quota for `operation`. Raises QuotaExceededError if the daily budget is
     exhausted — callers (tools.youtube.*) should let this propagate so the calling agent node
     can defer the operation rather than silently proceeding over budget."""
+    scope = scope or _active_scope()
     cost = UNIT_COSTS.get(operation, 1)
-    if not can_afford(operation):
+    if not can_afford(operation, scope):
         raise QuotaExceededError(
-            f"insufficient YouTube quota for '{operation}' (cost={cost}, remaining={remaining_units()})"
+            f"insufficient YouTube quota for '{operation}' "
+            f"(cost={cost}, remaining={remaining_units(scope)}, project={scope})"
         )
-    key = _today_key()
+    key = _today_key(scope)
     pipe = _redis().pipeline()
     pipe.incrby(key, cost)
     pipe.expire(key, 60 * 60 * 26)  # a bit past the UTC day boundary so it always covers today
     pipe.execute()
-    logger.info("quota.consumed", operation=operation, cost=cost, remaining=remaining_units())
+    logger.info("quota.consumed", operation=operation, cost=cost, remaining=remaining_units(scope), project=scope)
     return cost
 
 
-def refund(operation: str) -> int:
+def refund(operation: str, scope: str | None = None) -> int:
     """Gives back quota reserved for a call that never reached Google.
 
     consume() debits before the request, which is the safe order -- it cannot overspend. But
@@ -89,18 +134,19 @@ def refund(operation: str) -> int:
     reach Google (a 500 after the video was accepted, say) is the case this slightly over-refunds,
     and that is the safer direction to be wrong in than never refunding at all.
     """
+    scope = scope or _active_scope()
     cost = UNIT_COSTS.get(operation, 1)
-    key = _today_key()
+    key = _today_key(scope)
     used = int(_redis().get(key) or 0)
     give_back = min(cost, used)
     if give_back:
         _redis().decrby(key, give_back)
-    logger.info("quota.refunded", operation=operation, refunded=give_back, remaining=remaining_units())
+    logger.info("quota.refunded", operation=operation, refunded=give_back, remaining=remaining_units(scope), project=scope)
     return give_back
 
 
 @contextmanager
-def reserve(operation: str) -> Iterator[None]:
+def reserve(operation: str, scope: str | None = None) -> Iterator[None]:
     """consume() on enter, refund() if the block raises.
 
     For functions that make more than one billed call, or make one conditionally -- those cannot
@@ -108,15 +154,16 @@ def reserve(operation: str) -> Iterator[None]:
     is the cautionary case: it only inserts when the playlist is missing, so charging
     playlists.insert up front over-bills 50 units on every run that reuses an existing playlist.
     """
-    consume(operation)
+    scope = scope or _active_scope()
+    consume(operation, scope)
     try:
         yield
     except Exception:
-        refund(operation)
+        refund(operation, scope)
         raise
 
 
-def metered(operation: str):
+def metered(operation: str, scope: str | None = None):
     """Decorator: reserve quota for `operation`, and refund it if the wrapped call raises.
 
     Applied *below* @with_resilience so it runs per attempt -- each real attempt should be charged,
@@ -125,11 +172,14 @@ def metered(operation: str):
     def decorator(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            consume(operation)
+            # Resolved once and reused for the refund: charging one project and crediting
+            # whichever happens to be active a moment later would leak units between accounts.
+            call_scope = scope or _active_scope()
+            consume(operation, call_scope)
             try:
                 return fn(*args, **kwargs)
             except Exception:
-                refund(operation)
+                refund(operation, call_scope)
                 raise
 
         return wrapper

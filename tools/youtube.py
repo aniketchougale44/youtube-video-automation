@@ -170,7 +170,7 @@ def most_popular(region_code: str = "US", category_id: str | None = None, max_re
 
 
 @with_resilience(provider="youtube_data_api")
-@quota.metered("videos.list")
+@quota.metered("videos.list", scope=quota.DEPLOYMENT)
 def _most_popular_call(youtube, region_code: str, category_id: str | None, max_results: int) -> list[dict]:
     request_kwargs = {
         "part": "snippet,statistics",
@@ -218,7 +218,12 @@ def search_with_stats(query: str, max_results: int = 15) -> list[dict]:
 def _search_with_stats_call(youtube, query: str, max_results: int) -> list[dict]:
     # Two billed calls, the second conditional -- reserved inline rather than with @quota.metered,
     # which would charge videos.list even when the search came back empty.
-    with quota.reserve("search.list"):
+    #
+    # scope=DEPLOYMENT because these run on the API key, which belongs to this deployment's Google
+    # Cloud project. Billing them to the signed-in user's project would charge them for quota
+    # Google never took from them, while the operator's own budget looked untouched until it ran
+    # out mid-run.
+    with quota.reserve("search.list", scope=quota.DEPLOYMENT):
         search_response = (
             youtube.search().list(part="snippet", q=query, type="video", maxResults=max_results).execute()
         )
@@ -226,7 +231,7 @@ def _search_with_stats_call(youtube, query: str, max_results: int) -> list[dict]
     if not video_ids:
         return []
 
-    with quota.reserve("videos.list"):
+    with quota.reserve("videos.list", scope=quota.DEPLOYMENT):
         stats_response = youtube.videos().list(part="snippet,statistics", id=",".join(video_ids)).execute()
 
     videos = [
@@ -248,7 +253,7 @@ def _search_with_stats_call(youtube, query: str, max_results: int) -> list[dict]
 
 
 @with_resilience(provider="youtube_data_api")
-@quota.metered("search.list")
+@quota.metered("search.list", scope=quota.DEPLOYMENT)
 def _search_call(youtube, query: str, max_results: int) -> list[dict]:
     response = (
         youtube.search()
