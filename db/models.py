@@ -1,6 +1,7 @@
 """
 Postgres schema for AutoTube AI.
 
+Accounts: User, UserCredential (each user brings their own Google Cloud OAuth client).
 Core tables (per spec): Run, Video, AgentLog, UploadHistory, Cost.
 Supporting tables: PerformanceSnapshot (closes the analytics -> strategy feedback loop),
 ScriptEmbedding / TranscriptEmbedding (pgvector originality memory for the Script QA critic
@@ -36,12 +37,75 @@ def _uuid_pk() -> Mapped[uuid.UUID]:
     return mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
 
+class User(Base):
+    """An account. Email is the login identity and is stored lowercased to keep it unique in
+    practice as well as in the constraint -- people type their own address inconsistently."""
+
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    display_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    credential: Mapped["UserCredential | None"] = relationship(
+        back_populates="user", cascade="all, delete-orphan", uselist=False
+    )
+    runs: Mapped[list["Run"]] = relationship(back_populates="user")
+
+
+class UserCredential(Base):
+    """One user's own Google Cloud OAuth client and the YouTube channel they authorised with it.
+
+    Users bring their own credentials rather than authorising a central app. That decision is
+    what keeps this deployable: YouTube's 10,000 units/day quota is allocated per Google Cloud
+    project, so a shared app would give every user combined about four uploads a day, and
+    uploading to someone else's channel is a restricted scope that caps an unverified app at 100
+    users for the lifetime of the project. Per-user credentials sidestep both, and mean a breach
+    of this table does not hand over one central token that reaches every channel.
+
+    Every secret column holds Fernet ciphertext from core.crypto -- never plaintext. The columns
+    are sized for ciphertext, which is substantially longer than the value it wraps.
+    """
+
+    __tablename__ = "user_credentials"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    google_client_id: Mapped[str] = mapped_column(Text, default="")        # encrypted
+    google_client_secret: Mapped[str] = mapped_column(Text, default="")    # encrypted
+    youtube_refresh_token: Mapped[str] = mapped_column(Text, default="")   # encrypted
+    youtube_channel_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    youtube_channel_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Set when a refresh last failed, so the UI can say "reconnect your channel" before a run
+    # spends twenty minutes rendering a video it will not be able to upload.
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    user: Mapped["User"] = relationship(back_populates="credential")
+
+
 class Run(Base):
     """One row per pipeline execution. The single source of truth for resumability."""
 
     __tablename__ = "runs"
 
     id: Mapped[uuid.UUID] = _uuid_pk()
+    # Nullable on purpose: runs created before accounts existed have no owner, and inventing one
+    # for them would misreport whose channel they went to. Code that lists runs for a user filters
+    # on this, so an ownerless row is simply invisible to every account rather than visible to all.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     status: Mapped[RunStatus] = mapped_column(_str_enum(RunStatus, "run_status"), default=RunStatus.PENDING, index=True)
     current_stage: Mapped[PipelineStage | None] = mapped_column(_str_enum(PipelineStage, "pipeline_stage"), nullable=True)
     stage_status: Mapped[dict] = mapped_column(JSON, default=dict, doc="stage_name -> {status, retry_count, updated_at}")
@@ -57,6 +121,7 @@ class Run(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
+    user: Mapped["User | None"] = relationship(back_populates="runs")
     videos: Mapped[list["Video"]] = relationship(back_populates="run", cascade="all, delete-orphan")
     agent_logs: Mapped[list["AgentLog"]] = relationship(back_populates="run", cascade="all, delete-orphan")
     uploads: Mapped[list["UploadHistory"]] = relationship(back_populates="run", cascade="all, delete-orphan")

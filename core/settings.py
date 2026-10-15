@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     llm_fallback_model: str = "gpt-4o-mini"
     groq_api_key: str = ""  # free, no card required: console.groq.com
     llm_groq_model: str = "openai/gpt-oss-120b"  # llama-3.3-70b-versatile was decommissioned
+    # Signs sessions and encrypts every stored user credential. Rotating it logs everyone out and
+    # makes stored Google credentials unreadable, so it is backed up, not regenerated casually.
+    # Generate with: python -c "import secrets; print(secrets.token_urlsafe(48))"
+    app_secret_key: str = ""
     deepseek_api_key: str = ""  # platform.deepseek.com -- OpenAI-compatible, so no extra dependency
     # deepseek-chat (V3), deliberately not deepseek-reasoner (R1): every agent node here goes
     # through with_structured_output(), and the reasoner does not support function calling or
