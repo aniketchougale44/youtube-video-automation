@@ -39,7 +39,9 @@ key and a YouTube OAuth token. See the [go-live checklist](#go-live-checklist), 
   originality gate via pgvector embedding similarity against both prior YouTube transcripts and
   our own back catalog (`tools/embeddings.py`), LLM claim extraction + Tavily-backed verification.
 - **Visual Planning + Asset sourcing** (`graph/nodes/visual.py`) — LLM scene plan, Pexels/Pixabay
-  stock search with AI image-gen fallback when no stock match exists. Optionally (off by default,
+  stock search with AI image-gen fallback when no stock match exists (see
+  [how videos get their visuals](#how-videos-get-their-visuals--and-why-stock-is-the-default) for the
+  cost reasoning behind that default). Optionally (off by default,
   `ENABLE_AI_VIDEO_BEATS`) the planner routes beats to a real text-to-video generation.
   `MAX_AI_VIDEO_BEATS_PER_RUN` sets how aggressively: **`0` means no cap**, which also flips the
   planning prompt so AI_VIDEO becomes the default for every narrative beat — that is what makes a
@@ -137,6 +139,56 @@ which is a slideshow rather than a video. With it, a measured run sourced real H
 
 Optional, not blocking: `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID` / `SMTP_*` (Slack-only alerting
 works fine without them), `FREESOUND_API_KEY` (a synthesized pad is used otherwise).
+
+## How videos get their visuals — and why stock is the default
+
+Each script beat needs something on screen. There are two ways to get it, and the choice is the
+single biggest driver of what a video costs.
+
+**AI video generation** (`fal.ai`, Hugging Face, NVIDIA, Veo) produces a clip from a text prompt.
+It is the better-looking option for abstract or impossible-to-film beats, and it is metered:
+roughly **$0.15–$0.40 per 5-second clip** depending on model (`fal-ai/wan-t2v` is ~$0.40 at 720p;
+`wan/v2.2-5b` ~$0.15). A seven-beat video generated entirely this way is **$1–$3**.
+
+**Stock footage** (Pexels, with Pixabay as a second source) is real HD video, free, and arrives in
+seconds rather than minutes.
+
+Measured on real published runs in this repo, a full video on the stock path costs:
+
+| run | measured spend |
+|---|---|
+| 25 cost rows | **$0.00825** |
+| 21 cost rows | **$0.00815** |
+| 22 cost rows | **$0.00426** |
+
+Under a cent, against $1–$3 for the same video generated — **roughly 150x to 350x cheaper**. That
+is why stock is the default, not a fallback of last resort. The money buys very little on a
+seven-beat kids' video whose beats are mostly concrete things stock footage already has.
+
+### What happens with and without your own key
+
+**Without any AI-video key — the default.** `ENABLE_AI_VIDEO_BEATS` ships as `false`, so every beat
+is sourced from Pexels. Set `PEXELS_API_KEY` (free, instant) and that is the whole configuration:
+real HD footage on every beat, measured under a cent per video.
+
+**With your key.** Set `ENABLE_AI_VIDEO_BEATS=true` and one of `FAL_API_KEY`, `HUGGINGFACE_API_KEY`,
+`NVIDIA_API_KEY` or `GOOGLE_API_KEY`. `AI_VIDEO_PROVIDER=auto` then tries them in order
+(Colab → fal → Hugging Face → NVIDIA → Veo) and the first that answers wins.
+
+Two things to know, because they are deliberate rather than accidental:
+
+- **It does not switch the whole video over.** `MAX_AI_VIDEO_BEATS_PER_RUN` defaults to **3**, so
+  the planner reserves generation for a few standout beats — usually the hook — and the rest still
+  use stock. That caps the bill at ~$1 rather than $3 and is the reason the default is a cap rather
+  than "no cap". Set it to `0` to generate every narrative beat, once you have a generator you have
+  watched work.
+- **A failed generation becomes stock, not a gap.** If the provider is unreachable, out of credit or
+  rejects the prompt, that beat falls through to a stock search using the same keywords. A dead API
+  key degrades the video's look; it never fails the run.
+
+**Free generation, if you have the patience.** `AI_VIDEO_PROVIDER=colab` points at a Wan2.1 model
+you run yourself on a free Colab GPU — no API key and no spend, at roughly 6–12 minutes per beat.
+See [setup step 6](#6-free-ai-video-generation-via-google-colab).
 
 ## Chat studio
 
