@@ -1,0 +1,60 @@
+# Production overlay. Use together with the base file, never on its own:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# What it changes, and why each one matters once this is on a public address:
+#
+#   - Puts Caddy in front and terminates TLS. Caddy obtains and renews a Let's Encrypt
+#     certificate by itself from the domain in APP_DOMAIN, so there is no certbot cron to forget.
+#     TLS is not decoration here: the session cookie authenticates every request, and over plain
+#     HTTP it travels in clear on every hop.
+#   - Stops publishing Postgres, Redis and the app port on the host. In the base file those are
+#     bound for local development; on a public box that is a database open to the internet.
+#   - Serves the app only to Caddy, over the internal network.
+#
+# Everything else -- the images, the migrations on boot, the worker command -- is unchanged, so
+# what runs in production is what was tested locally.
+
+services:
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # Used by Caddyfile. ACME needs a real domain pointed at this host before it can issue.
+      APP_DOMAIN: ${APP_DOMAIN:?set APP_DOMAIN to your domain, e.g. studio.example.com}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data      # certificates live here; losing it means re-issuing on next boot
+      - caddy_config:/config
+    depends_on:
+      - api
+
+  api:
+    # No host port. Caddy reaches it as http://api:8000 on the compose network; nothing else can.
+    ports: !override []
+    environment:
+      APP_BASE_URL: https://${APP_DOMAIN}
+      # --proxy-headers below makes uvicorn trust Caddy's X-Forwarded-*, so request.url.scheme
+      # and the client IP are the real ones rather than the proxy's. The session cookie's Secure
+      # flag does not depend on it -- api/routes/auth.py reads the header directly, precisely so
+      # a missed uvicorn flag cannot silently downgrade a cookie -- but redirects built with
+      # url_for() and anything logging a client address do.
+      FORWARDED_ALLOW_IPS: "*"
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn api.main:app --host 0.0.0.0 --port 8000
+             --proxy-headers --forwarded-allow-ips='*'"
+
+  postgres:
+    ports: !override []
+
+  redis:
+    ports: !override []
+
+volumes:
+  caddy_data:
+  caddy_config:

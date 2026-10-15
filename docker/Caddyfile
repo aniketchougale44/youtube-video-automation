@@ -1,0 +1,43 @@
+# Reverse proxy and TLS for AutoTube Studio.
+#
+# Caddy obtains and renews a Let's Encrypt certificate for APP_DOMAIN automatically, provided the
+# domain's A record already points at this host and ports 80 and 443 reach it. Nothing to renew
+# by hand and no cron to forget.
+{
+	# Omit if ACME_EMAIL is unset; Let's Encrypt only uses it for expiry warnings.
+	email {$ACME_EMAIL}
+}
+
+{$APP_DOMAIN} {
+	encode gzip
+
+	# A render is a large file and an upload can be slow; the defaults are tighter than that.
+	request_body {
+		max_size 512MB
+	}
+
+	# Caddy sets X-Forwarded-Proto, X-Forwarded-For and Host on its own, which matters here:
+	# api/routes/auth.py reads X-Forwarded-Proto to decide whether the session cookie gets the
+	# Secure flag. Behind a proxy the app only ever sees plain HTTP, so without that header every
+	# cookie on an HTTPS site would be issued without Secure. Do not strip it.
+	reverse_proxy api:8000 {
+		# Video streams out of /media through the app, which checks ownership per request, so the
+		# proxy must not sit on the response waiting for it to finish.
+		flush_interval -1
+	}
+
+	header {
+		# Sent by the server rather than set per-response in code, so a route added later cannot
+		# forget them.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
