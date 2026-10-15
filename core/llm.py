@@ -7,6 +7,7 @@ tier, no card). A deployment with none of the paid keys set still runs end-to-en
 Gemini alone — each factory below just returns None when its key isn't set, so the chain skips
 straight past it.
 """
+import time
 from typing import TypeVar
 
 from pydantic import BaseModel
@@ -52,6 +53,31 @@ def _groq_llm():
     return ChatGroq(model=settings.llm_groq_model, api_key=settings.groq_api_key, timeout=60, max_retries=2)
 
 
+def _deepseek_llm():
+    """DeepSeek via its OpenAI-compatible endpoint, so ChatOpenAI serves it with no new dependency.
+
+    Pinned to deepseek-chat (V3) rather than deepseek-reasoner (R1) on purpose. Every agent node
+    reaches the model through call_structured() -> with_structured_output(), which is built on
+    function calling, and the reasoner does not support function calling or structured output. It
+    would not "reason better" here, it would fail the only calling convention this pipeline has.
+
+    The reasoning that matters for video decisions -- what to make, whether a script passes the
+    critics -- lives in the graph, which is where it stays inspectable and testable.
+    """
+    settings = get_settings()
+    if not settings.deepseek_api_key:
+        return None
+    from langchain_openai import ChatOpenAI
+
+    return ChatOpenAI(
+        model=settings.llm_deepseek_model,
+        api_key=settings.deepseek_api_key,
+        base_url="https://api.deepseek.com",
+        timeout=60,
+        max_retries=2,
+    )
+
+
 def _gemini_llm():
     """Free tier, no card required: https://aistudio.google.com/apikey"""
     settings = get_settings()
@@ -62,12 +88,40 @@ def _gemini_llm():
     return ChatGoogleGenerativeAI(model=settings.llm_gemini_model, api_key=settings.google_api_key, timeout=60, max_retries=2)
 
 
+# Order is fallback order, not preference: the first provider with a key configured handles the
+# call, and the rest exist for when it fails. DeepSeek sits ahead of the free tiers because it is
+# the one deliberately chosen for judgement-heavy nodes; groq and gemini remain underneath as the
+# no-card safety net, which is what keeps the pipeline running when a paid key lapses.
 _PROVIDERS = (
     ("anthropic", _anthropic_llm),
     ("openai", _openai_llm),
+    ("deepseek", _deepseek_llm),
     ("groq", _groq_llm),
     ("gemini", _gemini_llm),
 )
+
+
+# A key that is present but unusable -- unpaid balance, revoked, out of credit -- fails on every
+# single call, and a provider ahead of the working ones turns that into a tax on the whole
+# pipeline: ~1s per call, fourteen stages a run, plus the chat the operator is waiting on.
+#
+# It is specifically the billing/auth failures that are worth remembering. A timeout or a 500 is
+# worth retrying next call; "Insufficient Balance" will be just as true a second later, and a
+# human has to go and fix it. Those get the provider skipped for a while instead.
+_PROVIDER_COOLDOWN_SECONDS = 600
+_UNUSABLE_SIGNS = ("insufficient balance", "invalid api key", "incorrect api key",
+                   "401", "402", "403", "quota", "billing")
+_unusable_until: dict[str, float] = {}
+
+
+def _mark_unusable_if_terminal(provider_name: str, exc: Exception) -> None:
+    text = str(exc).lower()
+    if any(sign in text for sign in _UNUSABLE_SIGNS):
+        _unusable_until[provider_name] = time.monotonic() + _PROVIDER_COOLDOWN_SECONDS
+        logger.warning(
+            "llm.provider_benched", provider=provider_name,
+            seconds=_PROVIDER_COOLDOWN_SECONDS, reason=str(exc)[:160],
+        )
 
 
 def call_structured(prompt: str, output_model: type[T], system: str | None = None) -> T:
@@ -77,6 +131,9 @@ def call_structured(prompt: str, output_model: type[T], system: str | None = Non
 
     last_error: Exception | None = None
     for provider_name, factory in _PROVIDERS:
+        benched = _unusable_until.get(provider_name)
+        if benched and time.monotonic() < benched:
+            continue
         llm = factory()
         if llm is None:
             continue
@@ -98,11 +155,13 @@ def call_structured(prompt: str, output_model: type[T], system: str | None = Non
             return result
         except Exception as exc:
             logger.error("llm.call.failed", provider=provider_name, model=_model_name(llm), error=str(exc))
+            _mark_unusable_if_terminal(provider_name, exc)
             last_error = exc
 
     raise NoLLMProviderConfigured(
-        "no usable LLM provider: set one of ANTHROPIC_API_KEY, OPENAI_API_KEY, GROQ_API_KEY "
-        "(free: console.groq.com/keys), GOOGLE_API_KEY (free: aistudio.google.com/apikey)"
+        "no usable LLM provider: set one of ANTHROPIC_API_KEY, OPENAI_API_KEY, DEEPSEEK_API_KEY "
+        "(platform.deepseek.com), GROQ_API_KEY (free: console.groq.com/keys), GOOGLE_API_KEY "
+        "(free: aistudio.google.com/apikey)"
     ) from last_error
 
 

@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     llm_fallback_model: str = "gpt-4o-mini"
     groq_api_key: str = ""  # free, no card required: console.groq.com
     llm_groq_model: str = "openai/gpt-oss-120b"  # llama-3.3-70b-versatile was decommissioned
+    deepseek_api_key: str = ""  # platform.deepseek.com -- OpenAI-compatible, so no extra dependency
+    # deepseek-chat (V3), deliberately not deepseek-reasoner (R1): every agent node here goes
+    # through with_structured_output(), and the reasoner does not support function calling or
+    # structured output, so it cannot satisfy this pipeline's contract. See core/llm.py.
+    llm_deepseek_model: str = "deepseek-chat"
     google_api_key: str = ""  # free, no card required: aistudio.google.com/apikey
     llm_gemini_model: str = "gemini-3.6-flash"  # gemini-2.0-flash was retired; this is Google's
     # suggested replacement as of the retirement notice

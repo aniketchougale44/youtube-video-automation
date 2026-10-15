@@ -41,6 +41,11 @@ LLM_PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
     "gemini-3": (0.30, 2.50),
     "llama-3.3-70b": (0.59, 0.79),      # groq
     "openai/gpt-oss-120b": (0.15, 0.75),  # groq
+    # A model missing from this table is billed at 0.0, which reads on the dashboard as a free
+    # provider rather than an unpriced one -- so a paid provider must be listed the moment it is
+    # wired up, or its spend silently vanishes from the ops "spend by provider" panel.
+    "deepseek-chat": (0.28, 0.42),
+    "deepseek-reasoner": (0.56, 1.68),
 }
 
 # Flat per-unit prices for the non-LLM providers.

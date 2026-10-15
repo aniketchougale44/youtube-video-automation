@@ -27,6 +27,7 @@ def _settings(**overrides) -> types.SimpleNamespace:
         "anthropic_api_key": "", "llm_primary_model": "claude-sonnet-4-5",
         "openai_api_key": "", "llm_fallback_model": "gpt-4o-mini",
         "groq_api_key": "", "llm_groq_model": "llama-3.3-70b-versatile",
+        "deepseek_api_key": "", "llm_deepseek_model": "deepseek-chat",
         "google_api_key": "", "llm_gemini_model": "gemini-2.0-flash",
         "gemini_embedding_model": "models/gemini-embedding-001",
         "image_gen_provider": "pollinations", "openai_image_model": "gpt-image-1",
@@ -204,3 +205,44 @@ def test_embed_text_raises_when_nothing_configured(monkeypatch):
         raise AssertionError("expected EmbeddingsNotConfiguredError")
     except EmbeddingsNotConfiguredError:
         pass
+
+
+def test_a_provider_with_no_balance_is_benched_instead_of_retried(monkeypatch):
+    """A key that is present but unpaid fails identically on every call.
+
+    Left in the chain it costs a round trip per call -- fourteen stages a run, plus the chat an
+    operator is waiting on -- to learn what the previous call already proved. Terminal billing and
+    auth failures bench the provider; a timeout or a 500 would not, because those are worth
+    retrying.
+    """
+    from pydantic import BaseModel
+
+    from core import llm
+
+    class _Out(BaseModel):
+        value: str
+
+    calls = {"deepseek": 0, "groq": 0}
+
+    class _Dead:
+        def with_structured_output(self, *_a, **_k):
+            calls["deepseek"] += 1
+            raise RuntimeError("Error code: 402 - Insufficient Balance")
+
+    class _Live:
+        def with_structured_output(self, *_a, **_k):
+            calls["groq"] += 1
+            return self
+
+        def invoke(self, _messages):
+            return {"parsed": _Out(value="ok"), "raw": None}
+
+    monkeypatch.setattr("core.llm.get_settings", lambda: _settings())
+    monkeypatch.setattr(llm, "_PROVIDERS", (("deepseek", lambda: _Dead()), ("groq", lambda: _Live())))
+    monkeypatch.setattr(llm, "_unusable_until", {})
+
+    assert llm.call_structured("one", _Out).value == "ok"
+    assert llm.call_structured("two", _Out).value == "ok"
+
+    assert calls["deepseek"] == 1, "the unpaid provider should be tried once, then benched"
+    assert calls["groq"] == 2, "every call still gets served by the working provider"
