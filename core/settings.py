@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     # which would send people to an address that does not resolve for them. Empty = derive from
     # the request, which is correct for local development.
     app_base_url: str = ""
+    # Per-account limits. These protect what is still shared between accounts after per-user
+    # YouTube credentials: the render worker (minutes of CPU per video, small pool) and the
+    # deployment's own LLM keys. See core/limits.py.
+    max_concurrent_runs_per_user: int = 2
+    max_runs_per_user_per_day: int = 10
     deepseek_api_key: str = ""  # platform.deepseek.com -- OpenAI-compatible, so no extra dependency
     # deepseek-chat (V3), deliberately not deepseek-reasoner (R1): every agent node here goes
     # through with_structured_output(), and the reasoner does not support function calling or

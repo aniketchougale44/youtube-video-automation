@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from agents.schemas.common import RunStatus
 from api.routes.auth import require_user
 from api.routes.dashboard import _approval_rows, _build_snapshot
+from core.limits import RateLimited, check_can_start_run
 from core.llm import call_structured, choose_tool
 from core.logging import get_logger
 from core.settings import get_settings
@@ -461,6 +462,10 @@ def _tool_start_video(args: dict, db: Session, user) -> ChatReply:
             reply="What should the video be about? Name the subject and I'll start it.",
             intent="HELP",
         )
+    try:
+        check_can_start_run(db, user.id)
+    except RateLimited as limit:
+        return ChatReply(reply=str(limit), intent="HELP")
     run = create_run(db, user_topic=topic, user_id=user.id)
     _enqueue(str(run.id))
     return ChatReply(
@@ -482,6 +487,10 @@ def _tool_start_from_story(args: dict, db: Session, user) -> ChatReply:
             reply="That looks too short to build a video from — paste the full story and I'll use your words.",
             intent="HELP",
         )
+    try:
+        check_can_start_run(db, user.id)
+    except RateLimited as limit:
+        return ChatReply(reply=str(limit), intent="HELP")
     run = create_run(db, user_script=story, user_id=user.id)
     _enqueue(str(run.id))
     return ChatReply(

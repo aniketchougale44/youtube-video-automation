@@ -62,6 +62,9 @@ def effects(monkeypatch):
         chat_mod, "create_run",
         lambda db, **kw: types.SimpleNamespace(id=uuid.uuid4(), **kw),
     )
+    # Per-account limits are enforced before a run is created and are covered by their own tests;
+    # here they would just query a database these tests do not have.
+    monkeypatch.setattr(chat_mod, "check_can_start_run", lambda db, user_id: None)
     return seen
 
 
