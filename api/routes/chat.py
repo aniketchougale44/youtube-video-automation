@@ -1,10 +1,13 @@
 """Chat control surface for the studio dashboard.
 
-One endpoint, POST /api/chat, that turns a sentence into either an answer about the pipeline or a
-queued run. The LLM is used only to classify intent and pull out a topic or story -- every answer
-about system state is assembled from Postgres and Redis, never generated. That split is deliberate:
-an operator asking "what's happening right now" needs a fact, and a model that paraphrases run
-status will eventually paraphrase it wrong.
+One endpoint, POST /api/chat. The model is given a set of tools and chooses WHICH one runs and
+with what arguments; it never composes the answer. Every tool assembles its reply from Postgres
+and Redis, and that text is what the operator sees. The split is deliberate: an operator asking
+"what's happening right now" needs a fact, and a model that paraphrases run status will
+eventually paraphrase it wrong -- convincingly. Routing is the model's job; the facts are not.
+
+No tool publishes. Approving is matched here by exact phrase, before the model is consulted at
+all, so a misread sentence cannot put a video on someone's channel -- see _publish_decision.
 
 Triggering a run here creates the same Run row the scheduler creates, so a chat-requested video
 goes through the identical graph, critics and approval gate as a cron-triggered one. There is no
@@ -21,7 +24,7 @@ from sqlalchemy.orm import Session
 from agents.schemas.common import RunStatus
 from api.routes.auth import require_user
 from api.routes.dashboard import _approval_rows, _build_snapshot
-from core.llm import call_structured
+from core.llm import call_structured, choose_tool
 from core.logging import get_logger
 from core.settings import get_settings
 from db.base import get_db
@@ -31,7 +34,7 @@ from db.crud import (
     list_runs,
     summarize_recent_performance,
 )
-from db.models import ChatMessage
+from db.models import ChatMessage, Video
 
 logger = get_logger("api.chat")
 router = APIRouter()
@@ -54,59 +57,18 @@ class ChatReply(BaseModel):
     review: dict | None = None
 
 
-class _Intent(BaseModel):
-    """What the operator wants. Kept deliberately small -- this classifies, it does not answer."""
-
-    intent: str = Field(
-        description=(
-            "One of: STATUS (asking what is happening / progress / results / cost), "
-            "MAKE_TOPIC (asking for a video on a subject they name), "
-            "FROM_STORY (they pasted a story/script to turn into a video), "
-            "IDEAS (asking for content suggestions), "
-            "REVIEW (asking to see / preview / check the video that is waiting), "
-            "APPROVE (telling you to publish or upload the video that is waiting), "
-            "REJECT (telling you to scrap, bin or cancel the video that is waiting), "
-            "REVISE (asking to change the title or description of the waiting video), "
-            "HELP (anything else, including greetings)"
-        )
-    )
-    topic: str = Field(default="", description="For MAKE_TOPIC: the subject, as a short title")
-    story: str = Field(default="", description="For FROM_STORY: the story text, verbatim")
-    new_title: str = Field(
-        default="",
-        description="For REVISE: the replacement title, if they gave one. Empty if they only said what to change in general terms.",
-    )
-    new_description: str = Field(
-        default="", description="For REVISE: the replacement description, if they gave one."
-    )
-
-
 class _Ideas(BaseModel):
     ideas: list[str] = Field(description="4 short, concrete video ideas for this channel")
 
 
-_INTENT_SYSTEM = (
-    "Classify what the operator wants from a YouTube automation pipeline. A long block of narrative "
-    "prose is FROM_STORY even without an explicit instruction -- pasting a story IS the request. A "
-    "short phrase naming a subject is MAKE_TOPIC. Questions about progress, runs, videos, costs or "
-    "quota are STATUS. For FROM_STORY copy the story text verbatim into `story`; never summarise it. "
-    "A finished video may be waiting for the operator's decision: 'show it to me' / 'let me see' is "
-    "REVIEW, 'upload it' / 'publish' / 'yes, send it' / 'looks good' is APPROVE, 'scrap it' / 'no, "
-    "cancel' is REJECT, and anything asking for a different title or description is REVISE. For "
-    "REVISE, put the replacement text in new_title/new_description only when the operator actually "
-    "dictated it -- leave them empty when they just said something was wrong with it.\n"
-    "APPROVE is ONLY a bare confirmation of something that already exists -- it refers back ('it', "
-    "'that one', 'this'), and names no subject matter. The verb alone decides nothing: 'upload a "
-    "story for kids' and 'upload a video about dinosaurs' describe something that does not exist "
-    "yet, so they are MAKE_TOPIC, not APPROVE. If the message says what the video should be ABOUT, "
-    "it is a request to make one."
-)
+def _status_answer(db: Session, user_id=None) -> str:
+    """Assembled from real rows, not generated. See the module docstring.
 
-
-def _status_answer(db: Session) -> str:
-    """Assembled from real rows, not generated. See the module docstring."""
+    Scoped to the caller: "what's happening" must mean their runs and their spend, not the
+    deployment's.
+    """
     settings = get_settings()
-    snapshot = _build_snapshot(db)
+    snapshot = _build_snapshot(db, user_id=user_id)
 
     runs = snapshot.get("runs", [])
     stats = snapshot.get("stats", {})
@@ -355,42 +317,114 @@ def chat(
     return reply
 
 
-def _answer(message: str, db: Session, user) -> ChatReply:
+# --------------------------------------------------------------------------- the agent
+#
+# The model chooses WHICH action to take and with what arguments; it does not compose the answer.
+# Every tool below returns text assembled from real rows, and that text is what the operator
+# sees. The split is the same one the module docstring describes, and it is the reason a model
+# that has a bad day here gets the routing wrong -- answerable with "no, I meant X" -- rather
+# than inventing a run status that reads perfectly and is false.
+#
+# There is deliberately NO tool that publishes. See _publish_decision below.
 
-    try:
-        parsed = call_structured(message, _Intent, system=_INTENT_SYSTEM)
-        intent = (parsed.intent or "HELP").strip().upper()
-    except Exception as exc:
-        logger.warning("chat.intent_failed", error=str(exc))
-        # Without an LLM the dashboard should still answer "what's happening", which is the
-        # question an operator asks when something looks wrong -- exactly when the LLM may be down.
-        return ChatReply(reply=_status_answer(db), intent="STATUS")
 
-    logger.info("chat.intent", intent=intent, chars=len(message))
+class GetStatus(BaseModel):
+    """What the pipeline is doing right now: runs in flight, the last published video, failures,
+    spend and remaining YouTube quota. Use for any question about progress, cost or quota."""
 
-    if intent == "STATUS":
-        return ChatReply(reply=_status_answer(db), intent=intent)
 
-    if intent == "IDEAS":
-        ideas = _ideas_answer(db)
-        reply = "Here are four that fit your channel and what's performed:" if ideas else (
-            "I couldn't reach the LLM for ideas just now."
-        )
-        return ChatReply(reply=reply, intent=intent, suggestions=ideas)
+class StartVideo(BaseModel):
+    """Start making a video about a subject the operator named."""
 
-    if intent == "REVIEW":
-        card = _pending_review(db, user.id)
-        if card is None:
-            return _no_pending_reply(intent)
-        return ChatReply(reply=_review_text(card), intent=intent, run_id=card["id"], review=card)
+    topic: str = Field(description="the subject, as a short title, in the operator's own words")
 
-    if intent == "APPROVE":
-        card = _pending_review(db, user.id)
-        if card is None:
-            return _no_pending_reply(intent)
-        if _describes_new_content(message):
-            logger.info("chat.approve_ambiguous", run_id=card["id"], chars=len(message))
-            return _ambiguous_reply(card, message)
+
+class StartFromStory(BaseModel):
+    """Build a video from a story or script the operator pasted, using their own wording."""
+
+    story: str = Field(description="the story text, copied verbatim, never summarised")
+
+
+class ShowPendingReview(BaseModel):
+    """Show the finished video that is waiting for a decision, so the operator can watch it."""
+
+
+class SuggestIdeas(BaseModel):
+    """Suggest video ideas that fit this channel and what has performed well."""
+
+
+class ExplainLastFailure(BaseModel):
+    """Explain why the most recent run failed, in terms of what to do about it."""
+
+
+class ListPublished(BaseModel):
+    """List the videos published most recently, with their links."""
+
+
+class GetHelp(BaseModel):
+    """Explain what this assistant can do. Use when nothing else fits, or for a greeting."""
+
+
+_TOOLS = [
+    GetStatus, StartVideo, StartFromStory, ShowPendingReview,
+    SuggestIdeas, ExplainLastFailure, ListPublished, GetHelp,
+]
+
+_AGENT_SYSTEM = (
+    "You route an operator's message to exactly one action in a YouTube automation pipeline. "
+    "Call the single tool that does what they asked; do not answer in prose. "
+    "A long block of narrative prose is StartFromStory even with no instruction attached -- "
+    "pasting a story IS the request, and the story must be copied verbatim, never summarised. "
+    "A short phrase naming a subject is StartVideo. Questions about progress, runs, cost or "
+    "quota are GetStatus. 'why did it fail' is ExplainLastFailure. "
+    "A publish verb does not by itself mean publish: 'upload a story for kids' describes "
+    "something that does not exist yet, so it is StartVideo. If the operator seems to be "
+    "approving or scrapping the video that is waiting, call ShowPendingReview -- you cannot "
+    "publish, and showing them the video with its buttons is the correct response."
+)
+
+
+# Approving publishes to YouTube, so it is decided here, by exact phrase, and never by the model.
+#
+# The guard that already existed asks "does this describe new content", which stops
+# "upload a story for kids" publishing. It does not stop a misrouted "what's happening" being
+# read as approval -- short, no content words, passes the guard. Matching an explicit
+# confirmation closes that: the model cannot cause a publish by misunderstanding, because the
+# model is not consulted. Anything it does not match falls through to the agent, which can only
+# offer the card and its buttons.
+_APPROVE_PHRASES = frozenset({
+    "upload it", "upload", "publish it", "publish", "approve", "approve it", "ship it",
+    "send it", "post it", "go ahead", "do it", "yes", "yep", "yes please", "looks good",
+    "lgtm", "upload it now", "publish it now", "approved",
+})
+_REJECT_PHRASES = frozenset({
+    "scrap it", "scrap", "reject", "reject it", "bin it", "delete it", "cancel it", "cancel",
+    "no", "nope", "don't upload", "do not upload", "discard", "discard it", "throw it away",
+})
+
+
+def _normalise(message: str) -> str:
+    return " ".join(message.lower().strip().strip(".!").split())
+
+
+def _publish_decision(message: str, db: Session, user) -> ChatReply | None:
+    """Handles approve/scrap without consulting the model, or returns None to let the agent run."""
+    phrase = _normalise(message)
+    approving = phrase in _APPROVE_PHRASES
+    rejecting = phrase in _REJECT_PHRASES
+    if not (approving or rejecting):
+        return None
+
+    card = _pending_review(db, user.id)
+    if card is None:
+        return _no_pending_reply("APPROVE" if approving else "REJECT")
+
+    # Belt and braces: the phrase list cannot match anything describing new content, but the
+    # guard stays because it is the rule, not an implementation detail of the list.
+    if _describes_new_content(message):
+        return _ambiguous_reply(card, message)
+
+    if approving:
         _resume(card["id"], approved=True, notes=message)
         return ChatReply(
             reply=(
@@ -398,108 +432,205 @@ def _answer(message: str, db: Session, user) -> ChatReply:
                 f"**{get_settings().youtube_upload_visibility}**, then the thumbnail. "
                 "Ask me what's happening to watch it land."
             ),
-            intent=intent,
+            intent="APPROVE",
             run_id=card["id"],
         )
 
-    if intent == "REJECT":
-        card = _pending_review(db, user.id)
-        if card is None:
-            return _no_pending_reply(intent)
-        _resume(card["id"], approved=False, notes=message)
-        return ChatReply(
-            reply=(
-                f"Scrapped **{card['title']}** — it will not be uploaded. The render stays on disk "
-                "in case you want it later."
-            ),
-            intent=intent,
-            run_id=card["id"],
-        )
-
-    if intent == "REVISE":
-        card = _pending_review(db, user.id)
-        if card is None:
-            return _no_pending_reply(intent)
-        new_title = (parsed.new_title or "").strip()
-        new_description = (parsed.new_description or "").strip()
-        if not new_title and not new_description:
-            # The model understood "the title is wrong" but has nothing to write. Asking is better
-            # than inventing a title the operator never chose for a video about to go public.
-            return ChatReply(
-                reply=(
-                    "Happy to change it — what should it say instead? The title now is "
-                    f"**{card['title']}**.\n\nGive me the exact words, like _change the title to "
-                    "Counting to Ten with Friendly Animals_."
-                ),
-                intent="HELP",
-                run_id=card["id"],
-                review=card,
-            )
-        # Editing a parked run in place is not wired up yet, and the half-built version was worse
-        # than nothing: writing the checkpoint destroyed the pending interrupt, which emptied the
-        # review packet, and the only way found to rebuild it re-entered the gate -- where a queued
-        # decision could carry the run straight to upload. Until the edit can be carried in the
-        # approval decision itself, say so plainly rather than risk an unasked-for publish.
-        wanted = new_title or new_description
-        return ChatReply(
-            reply=(
-                f"I can't edit **{card['title']}** in place yet — that path isn't finished, and the "
-                "unfinished version risked publishing the video instead of editing it.\n\n"
-                f"What you asked for: _{wanted}_\n\n"
-                "For now: **scrap it** and name the topic again with the wording you want, or "
-                "**upload it** as it stands and rename it on YouTube, which takes a few seconds "
-                "there and costs nothing here."
-            ),
-            intent="HELP",
-            run_id=card["id"],
-            review=card,
-        )
-
-    if intent == "MAKE_TOPIC":
-        topic = (parsed.topic or message)[:300]
-        run = create_run(db, user_topic=topic, user_id=user.id)
-        _enqueue(str(run.id))
-        return ChatReply(
-            reply=(
-                f"Queued a video on **{topic}**.\n\n"
-                "It skips trend research (saving ~400 quota units, since you named the topic) and "
-                "still goes through both critics and the compliance gate. Ask me what's happening "
-                "to follow it."
-            ),
-            intent=intent,
-            run_id=str(run.id),
-        )
-
-    if intent == "FROM_STORY":
-        story = (parsed.story or message)[:MAX_STORY_CHARS]
-        if len(story.split()) < 20:
-            return ChatReply(
-                reply="That looks too short to build a video from — paste the full story and I'll use your words.",
-                intent="HELP",
-            )
-        run = create_run(db, user_script=story, user_id=user.id)
-        _enqueue(str(run.id))
-        return ChatReply(
-            reply=(
-                f"Queued a video from your story ({len(story.split())} words).\n\n"
-                "Your wording is segmented into beats rather than rewritten. It still passes through "
-                "the originality and compliance critics — worth knowing if the story isn't yours to "
-                "publish."
-            ),
-            intent=intent,
-            run_id=str(run.id),
-        )
-
+    _resume(card["id"], approved=False, notes=message)
     return ChatReply(
         reply=(
-            "I can do four things:\n\n"
-            "- **Tell you what's happening** — \"what's going on right now?\"\n"
-            "- **Make a video on a topic** — \"make a video about counting to ten\"\n"
-            "- **Use your story** — paste it and I'll build the video from your words\n"
-            "- **Suggest ideas** — \"give me some ideas\""
+            f"Scrapped **{card['title']}** — it will not be uploaded. The render stays on disk "
+            "in case you want it later."
         ),
-        intent="HELP",
+        intent="REJECT",
+        run_id=card["id"],
     )
+
+
+# --------------------------------------------------------------------------- tool handlers
+
+
+def _tool_status(args: dict, db: Session, user) -> ChatReply:
+    return ChatReply(reply=_status_answer(db, user.id), intent="STATUS")
+
+
+def _tool_start_video(args: dict, db: Session, user) -> ChatReply:
+    topic = (args.get("topic") or "").strip()[:300]
+    if not topic:
+        return ChatReply(
+            reply="What should the video be about? Name the subject and I'll start it.",
+            intent="HELP",
+        )
+    run = create_run(db, user_topic=topic, user_id=user.id)
+    _enqueue(str(run.id))
+    return ChatReply(
+        reply=(
+            f"Started a video on **{topic}**.\n\n"
+            "It skips trend research (saving ~400 quota units, since you named the topic) and "
+            "still goes through both critics and the compliance gate. When it's done I'll show "
+            "it to you here — nothing publishes until you say so."
+        ),
+        intent="MAKE_TOPIC",
+        run_id=str(run.id),
+    )
+
+
+def _tool_start_from_story(args: dict, db: Session, user) -> ChatReply:
+    story = (args.get("story") or "").strip()[:MAX_STORY_CHARS]
+    if len(story.split()) < 20:
+        return ChatReply(
+            reply="That looks too short to build a video from — paste the full story and I'll use your words.",
+            intent="HELP",
+        )
+    run = create_run(db, user_script=story, user_id=user.id)
+    _enqueue(str(run.id))
+    return ChatReply(
+        reply=(
+            f"Started a video from your story ({len(story.split())} words).\n\n"
+            "Your wording is segmented into beats rather than rewritten. It still passes through "
+            "the originality and compliance critics — worth knowing if the story isn't yours to "
+            "publish. I'll show you the result before anything is uploaded."
+        ),
+        intent="FROM_STORY",
+        run_id=str(run.id),
+    )
+
+
+def _tool_show_review(args: dict, db: Session, user) -> ChatReply:
+    card = _pending_review(db, user.id)
+    if card is None:
+        return _no_pending_reply("REVIEW")
+    return ChatReply(reply=_review_text(card), intent="REVIEW", run_id=card["id"], review=card)
+
+
+def _tool_ideas(args: dict, db: Session, user) -> ChatReply:
+    ideas = _ideas_answer(db)
+    return ChatReply(
+        reply=(
+            "Here are four that fit your channel and what's performed:" if ideas
+            else "I couldn't reach the LLM for ideas just now."
+        ),
+        intent="IDEAS",
+        suggestions=ideas,
+    )
+
+
+def _tool_explain_failure(args: dict, db: Session, user) -> ChatReply:
+    """Reads the failure off the run, and translates the ones with a known cause.
+
+    The raw error is the truth and is always shown, but "invalid_grant" and a 403 from a speech
+    endpoint do not tell an operator what to do, and both cost a full render before they appear.
+    """
+    failed = [
+        r for r in list_runs(db, limit=20, user_id=user.id)
+        if r.status in (RunStatus.FAILED, RunStatus.ESCALATED)
+    ]
+    if not failed:
+        return ChatReply(reply="Nothing has failed recently — the last runs all completed.", intent="STATUS")
+
+    run = failed[0]
+    error = (run.error or "").strip() or "no error was recorded"
+    topic = (run.selected_topic or {}).get("title") or (
+        (run.stage_status or {}).get("user_inputs") or {}
+    ).get("topic") or "that run"
+
+    hint = ""
+    low = error.lower()
+    if "invalid_grant" in low:
+        hint = (
+            "\n\nThat is your YouTube authorisation, not the video. Reconnect your channel in "
+            "onboarding — and if your Google consent screen is still in Testing, publish it, "
+            "because Testing expires the connection every 7 days."
+        )
+    elif "speech.platform.bing.com" in low or "edge" in low and "403" in low:
+        hint = "\n\nThat is the free text-to-speech provider refusing the request, not your script."
+    elif "no usable llm provider" in low:
+        hint = (
+            "\n\nEvery language-model provider failed at once, which is usually a passing outage "
+            "rather than a key problem. Starting it again is the right move."
+        )
+    elif "quota" in low:
+        hint = "\n\nThat is the daily YouTube API budget for your Google project, which resets at midnight Pacific."
+
+    return ChatReply(
+        reply=f"**{topic}** failed at **{run.current_stage or 'an early stage'}**.\n\n`{error[:400]}`{hint}",
+        intent="STATUS",
+        run_id=str(run.id),
+    )
+
+
+def _tool_list_published(args: dict, db: Session, user) -> ChatReply:
+    runs = [r for r in list_runs(db, limit=30, user_id=user.id) if r.status == RunStatus.PUBLISHED]
+    rows = []
+    for run in runs[:6]:
+        video = db.execute(
+            select(Video).where(Video.run_id == run.id).order_by(Video.created_at.desc())
+        ).scalars().first()
+        if video and video.youtube_video_id:
+            rows.append(f"- **{video.title or 'Untitled'}** — https://youtube.com/watch?v={video.youtube_video_id}")
+    if not rows:
+        return ChatReply(
+            reply="Nothing published from this account yet. Name a topic and I'll make the first one.",
+            intent="STATUS",
+        )
+    return ChatReply(reply="Published so far:\n\n" + "\n".join(rows), intent="STATUS")
+
+
+def _tool_help(args: dict, db: Session, user) -> ChatReply:
+    return ChatReply(reply=_HELP_TEXT, intent="HELP")
+
+
+_HELP_TEXT = (
+    "Here's what I can do:\n\n"
+    "- **Make a video** — name a subject, like _a story about counting to ten_\n"
+    "- **Use your own story** — paste it and I'll build the video from your words\n"
+    "- **Show you what's happening** — runs in flight, spend, quota\n"
+    "- **Explain a failure** — _why did the last run fail?_\n"
+    "- **Show the finished video** — _show me the one waiting_\n"
+    "- **Suggest ideas** — _give me some ideas_\n"
+    "- **List what's published**\n\n"
+    "When a video is finished I'll show it here first. Say **upload it** to publish or "
+    "**scrap it** to bin it — nothing goes to YouTube until you do."
+)
+
+_HANDLERS = {
+    "GetStatus": _tool_status,
+    "StartVideo": _tool_start_video,
+    "StartFromStory": _tool_start_from_story,
+    "ShowPendingReview": _tool_show_review,
+    "SuggestIdeas": _tool_ideas,
+    "ExplainLastFailure": _tool_explain_failure,
+    "ListPublished": _tool_list_published,
+    "GetHelp": _tool_help,
+}
+
+
+def _answer(message: str, db: Session, user) -> ChatReply:
+    # Publishing is decided before the model is consulted, and the model has no tool for it.
+    decision = _publish_decision(message, db, user)
+    if decision is not None:
+        return decision
+
+    try:
+        chosen = choose_tool(message, _TOOLS, system=_AGENT_SYSTEM)
+    except Exception as exc:
+        logger.warning("chat.tool_choice_failed", error=str(exc))
+        # The question an operator asks when something looks wrong is "what's happening" -- which
+        # is exactly when the model is most likely to be the thing that is wrong. Answer it from
+        # the database instead of apologising.
+        return ChatReply(reply=_status_answer(db, user.id), intent="STATUS")
+
+    if chosen is None:
+        return _tool_help({}, db, user)
+
+    name, args = chosen
+    handler = _HANDLERS.get(name)
+    if handler is None:
+        logger.warning("chat.unknown_tool", tool=name)
+        return _tool_help({}, db, user)
+
+    logger.info("chat.tool", tool=name, chars=len(message))
+    return handler(args, db, user)
 
 
 def _enqueue(run_id: str) -> None:
