@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from api.routes import auth, chat, dashboard, onboarding, runs, webhooks
+from api.routes import auth, chat, dashboard, media, onboarding, runs, webhooks
 from api.routes.auth import optional_user
 from core.logging import configure_logging
 from core.settings import get_settings
@@ -22,11 +22,11 @@ app = FastAPI(
 )
 
 app.mount("/static", StaticFiles(directory="api/static"), name="static")
-# Renders/thumbnails a run produced under settings.media_dir, so the review dashboard can show the
-# real thumbnail images and link the final video instead of grey placeholders. Read-only; the
-# dashboard only ever builds URLs under here via dashboard._media_url (which refuses paths outside
-# media_dir), and StaticFiles itself blocks path traversal on the serving side.
-app.mount("/media", StaticFiles(directory=settings.media_dir), name="media")
+
+# /media is NOT a static mount. It was, and that served every render, voiceover and thumbnail to
+# anyone who asked -- no session, no ownership check. Before a video is uploaded, the file under
+# media_dir is the only copy that exists, and a run id in a URL is not a secret. It is now a
+# route that checks the signed-in account owns the run: see api/routes/media.py.
 
 app.include_router(runs.router, prefix="/api/runs", tags=["runs"])
 app.include_router(webhooks.router, prefix="/api/webhooks", tags=["webhooks"])
@@ -34,6 +34,7 @@ app.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
 app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
 app.include_router(onboarding.router, prefix="/onboarding", tags=["onboarding"])
+app.include_router(media.router, prefix="/media", tags=["media"])
 
 
 @app.exception_handler(StarletteHTTPException)

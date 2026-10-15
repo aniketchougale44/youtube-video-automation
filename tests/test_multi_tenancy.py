@@ -110,3 +110,39 @@ def test_a_scheduled_run_has_no_owner_rather_than_a_guessed_one():
 
     run = create_run(MagicMock(), user_topic="nightly scheduled video")
     assert run.user_id is None
+
+
+# --------------------------------------------------------------------- media access
+
+
+def test_media_path_resolution_refuses_to_escape_the_run_directory():
+    """/media used to be a public static mount; serving files by hand means doing the traversal
+    check that StaticFiles was doing. A URL segment of "../" is the oldest way to read a file
+    that was never meant to be served."""
+    import uuid as _uuid
+
+    from fastapi import HTTPException
+
+    from api.routes.media import _resolve
+
+    run_id = _uuid.uuid4()
+    for escape in ("../../../.env", "..%2f..%2f.env", "render/../../../../etc/passwd"):
+        with pytest.raises(HTTPException) as caught:
+            _resolve(run_id, escape)
+        assert caught.value.status_code == 404
+
+
+def test_media_resolution_404s_a_file_that_is_not_there(tmp_path, monkeypatch):
+    import types
+    import uuid as _uuid
+
+    from fastapi import HTTPException
+
+    from api.routes import media as media_mod
+
+    monkeypatch.setattr(
+        media_mod, "get_settings", lambda: types.SimpleNamespace(media_dir=str(tmp_path))
+    )
+    with pytest.raises(HTTPException) as caught:
+        media_mod._resolve(_uuid.uuid4(), "render/final.mp4")
+    assert caught.value.status_code == 404

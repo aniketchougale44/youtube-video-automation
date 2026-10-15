@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
+from sqlalchemy import true as sa_true
 from sqlalchemy.orm import Session
 
 from agents.schemas.common import RunStatus
@@ -351,6 +352,11 @@ def _build_snapshot(db: Session, user_id=None) -> dict:
 # an operations screen that invents a number is worse than one that admits a gap.
 
 
+def _owned_runs(user_id):
+    """Cost rows belong to a run, so a user's spend is the spend of the runs they own."""
+    return Cost.run_id.in_(select(Run.id).where(Run.user_id == user_id).scalar_subquery())
+
+
 def _quota_panel() -> dict:
     """Today's YouTube API budget. A full publish is ~2,050 units of the daily 10,000."""
     try:
@@ -409,7 +415,7 @@ def _youtube_auth_panel() -> dict:
     return result
 
 
-def _spend_series(db: Session, days: int = 14) -> list[dict]:
+def _spend_series(db: Session, days: int = 14, user_id=None) -> list[dict]:
     """Daily measured spend. Only days that actually have cost rows are returned."""
     rows = db.execute(
         select(
@@ -417,24 +423,26 @@ def _spend_series(db: Session, days: int = 14) -> list[dict]:
             func.sum(Cost.total_usd).label("total"),
         )
         .where(Cost.created_at >= datetime.now(UTC) - timedelta(days=days))
+        .where(_owned_runs(user_id) if user_id is not None else sa_true())
         .group_by(func.date(Cost.created_at))
         .order_by(func.date(Cost.created_at))
     ).all()
     return [{"day": str(r.day), "usd": round(float(r.total or 0), 4)} for r in rows]
 
 
-def _spend_by_provider(db: Session) -> list[dict]:
+def _spend_by_provider(db: Session, user_id=None) -> list[dict]:
     """Where the money goes, all-time, biggest first. Grouped by provider rather than stage:
     the actionable question is which vendor to swap, not which node called it."""
     rows = db.execute(
         select(Cost.provider, func.sum(Cost.total_usd).label("total"))
+        .where(_owned_runs(user_id) if user_id is not None else sa_true())
         .group_by(Cost.provider)
         .order_by(func.sum(Cost.total_usd).desc())
     ).all()
     return [{"provider": r.provider or "unknown", "usd": round(float(r.total or 0), 4)} for r in rows]
 
 
-def _stage_timings(db: Session, limit_runs: int = 20) -> list[dict]:
+def _stage_timings(db: Session, limit_runs: int = 20, user_id=None) -> list[dict]:
     """Mean wall-clock seconds per pipeline stage, from consecutive agent_log timestamps.
 
     agent_logs record when a stage logged, not how long it took, so a stage's duration is inferred
@@ -442,9 +450,10 @@ def _stage_timings(db: Session, limit_runs: int = 20) -> list[dict]:
     dropped rather than guessed, which is why `samples` is reported -- a stage with 1 sample is an
     anecdote, not a timing.
     """
-    recent_run_ids = [
-        r.id for r in db.execute(select(Run).order_by(Run.created_at.desc()).limit(limit_runs)).scalars()
-    ]
+    recent_q = select(Run).order_by(Run.created_at.desc()).limit(limit_runs)
+    if user_id is not None:
+        recent_q = recent_q.where(Run.user_id == user_id)
+    recent_run_ids = [r.id for r in db.execute(recent_q).scalars()]
     if not recent_run_ids:
         return []
 
@@ -475,14 +484,20 @@ def _stage_timings(db: Session, limit_runs: int = 20) -> list[dict]:
     return out
 
 
-def _performance_rows(db: Session, limit: int = 12) -> list[dict]:
+def _performance_rows(db: Session, limit: int = 12, user_id=None) -> list[dict]:
     """Newest performance snapshot per window, joined to the video it describes."""
-    rows = db.execute(
+    stmt = (
         select(PerformanceSnapshot, Video)
         .join(Video, Video.id == PerformanceSnapshot.video_id)
         .order_by(PerformanceSnapshot.captured_at.desc())
         .limit(limit)
-    ).all()
+    )
+    if user_id is not None:
+        # A video belongs to a run, and a run to an account.
+        stmt = stmt.where(
+            Video.run_id.in_(select(Run.id).where(Run.user_id == user_id).scalar_subquery())
+        )
+    rows = db.execute(stmt).all()
     return [
         {
             "title": v.title or "(untitled)",
@@ -500,23 +515,40 @@ def _performance_rows(db: Session, limit: int = 12) -> list[dict]:
     ]
 
 
-def _build_ops(db: Session) -> dict:
+def _build_ops(db: Session, user_id=None) -> dict:
+    """Per-account where the data is per-account. Spend and performance are the user's own; quota
+    and the YouTube auth check read whatever credentials are acting, which for a signed-in user
+    is their own connected channel."""
     return {
         "generated_at": datetime.now(UTC).isoformat(),
         "quota": _quota_panel(),
         "youtube_auth": _youtube_auth_panel(),
         "approval_gate_on": get_settings().require_human_approval,
         "upload_visibility": get_settings().youtube_upload_visibility,
-        "spend_series": _spend_series(db),
-        "spend_by_provider": _spend_by_provider(db),
-        "stage_timings": _stage_timings(db),
-        "performance": _performance_rows(db),
+        "spend_series": _spend_series(db, user_id=user_id),
+        "spend_by_provider": _spend_by_provider(db, user_id=user_id),
+        "stage_timings": _stage_timings(db, user_id=user_id),
+        "performance": _performance_rows(db, user_id=user_id),
         "learned_weights": latest_strategy_weight_adjustments(db),
     }
 
 
+def _owned_run_or_404(db: Session, run_id: uuid.UUID, user) -> Run:
+    """The run, if it belongs to this account. 404 otherwise -- including for a run that exists
+    but belongs to someone else, because a 403 would confirm it exists.
+
+    Approving is the operation that publishes a video to a channel, so "which run is this" and
+    "may this account act on it" have to be answered together, in one place, rather than left to
+    each endpoint to remember.
+    """
+    run = get_run(db, run_id)
+    if run is None or run.user_id is None or run.user_id != user.id:
+        raise HTTPException(404, "run not found")
+    return run
+
+
 @router.get("/")
-def dashboard_index(request: Request, db: Session = Depends(get_db)):
+def dashboard_index(request: Request, db: Session = Depends(get_db), user=Depends(current_user)):
     # The approval queue, run table, and activity feed all render client-side from this one
     # snapshot (embedded for first paint, then refreshed over /stream) so nothing on the page
     # needs a manual reload to stay current.
@@ -524,7 +556,7 @@ def dashboard_index(request: Request, db: Session = Depends(get_db)):
 
 
 @router.get("/stream")
-def dashboard_stream():
+def dashboard_stream(user=Depends(require_user)):
     """Server-Sent Events feed: pushes a fresh snapshot (run statuses, live pipeline position,
     recent agent activity, cost) every 2s so the dashboard updates without polling or a reload."""
 
@@ -569,7 +601,7 @@ def studio(request: Request, user=Depends(current_user), db: Session = Depends(g
 
 
 @router.get("/channel")
-def dashboard_channel():
+def dashboard_channel(user=Depends(require_user)):
     """The channel's real uploads, for the studio's Published panel.
 
     Not read from the `videos` table: that only records what the pipeline published, so one-off
@@ -605,19 +637,19 @@ def dashboard_snapshot(db: Session = Depends(get_db), user=Depends(require_user)
 # /dashboard/studio would match this route's shape and fail validation with a 422 rather than
 # falling through to it.
 @router.get("/ops")
-def ops(request: Request):
+def ops(request: Request, user=Depends(current_user)):
     return templates.TemplateResponse(request, "ops.html", {})
 
 
 @router.get("/ops/snapshot")
-def ops_snapshot(db: Session = Depends(get_db)):
+def ops_snapshot(db: Session = Depends(get_db), user=Depends(require_user)):
     """Separate from /dashboard/snapshot on purpose: this one makes a live token-refresh call to
     Google, so it is polled far less often than the 5s run/stage poll."""
-    return _build_ops(db)
+    return _build_ops(db, user_id=user.id)
 
 
 @router.get("/{run_id}")
-def dashboard_review(request: Request, run_id: uuid.UUID, db: Session = Depends(get_db)):
+def dashboard_review(request: Request, run_id: uuid.UUID, db: Session = Depends(get_db), user=Depends(current_user)):
     run = get_run(db, run_id)
     if run is None:
         raise HTTPException(404, "run not found")
@@ -661,9 +693,10 @@ def dashboard_approve(
     notes: str = Form(""),
     selected_thumbnail_index: int = Form(0),
     db: Session = Depends(get_db),
+    user=Depends(require_user),
 ):
-    run = get_run(db, run_id)
-    if run is None or run.status != RunStatus.AWAITING_APPROVAL:
+    run = _owned_run_or_404(db, run_id, user)
+    if run.status != RunStatus.AWAITING_APPROVAL:
         raise HTTPException(409, "run not awaiting approval")
     decision = {
         "run_id": str(run_id),
@@ -677,9 +710,15 @@ def dashboard_approve(
 
 
 @router.post("/{run_id}/reject")
-def dashboard_reject(run_id: uuid.UUID, reviewer: str = Form("dashboard"), notes: str = Form(""), db: Session = Depends(get_db)):
-    run = get_run(db, run_id)
-    if run is None or run.status != RunStatus.AWAITING_APPROVAL:
+def dashboard_reject(
+    run_id: uuid.UUID,
+    reviewer: str = Form("dashboard"),
+    notes: str = Form(""),
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+):
+    run = _owned_run_or_404(db, run_id, user)
+    if run.status != RunStatus.AWAITING_APPROVAL:
         raise HTTPException(409, "run not awaiting approval")
     decision = {"run_id": str(run_id), "approved": False, "reviewer": reviewer, "notes": notes}
     resume_pipeline_task.delay(str(run_id), decision)
