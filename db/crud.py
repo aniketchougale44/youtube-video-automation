@@ -21,6 +21,7 @@ def create_run(
     debug_force_reject: dict | None = None,
     user_topic: str | None = None,
     user_script: str | None = None,
+    user_id: uuid.UUID | None = None,
 ) -> Run:
     """Creates the Run row a Celery task will pick up.
 
@@ -30,6 +31,7 @@ def create_run(
     """
     run = Run(
         id=uuid.uuid4(),
+        user_id=user_id,
         status=RunStatus.PENDING,
         langgraph_thread_id=str(uuid.uuid4()),
         stage_status={
@@ -47,10 +49,20 @@ def get_run(db: Session, run_id: uuid.UUID) -> Run | None:
     return db.get(Run, run_id)
 
 
-def list_runs(db: Session, status: RunStatus | None = None, limit: int = 50) -> list[Run]:
+def list_runs(
+    db: Session,
+    status: RunStatus | None = None,
+    limit: int = 50,
+    user_id: uuid.UUID | None = None,
+) -> list[Run]:
+    """`user_id=None` means every run, which is what the scheduler and the operator dashboard
+    want. A web request must always pass one -- otherwise one account sees another's work.
+    Omitting it is not a filter that defaults to "mine", it is no filter at all."""
     stmt = select(Run).order_by(Run.created_at.desc()).limit(limit)
     if status is not None:
         stmt = stmt.where(Run.status == status)
+    if user_id is not None:
+        stmt = stmt.where(Run.user_id == user_id)
     return list(db.execute(stmt).scalars())
 
 

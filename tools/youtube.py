@@ -13,6 +13,9 @@ deliberately happens *outside* the retried section below — a missing API key i
 misconfiguration, not a transient failure, and shouldn't burn retry attempts or help trip the
 circuit breaker.
 """
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 
 from google.auth.exceptions import RefreshError
@@ -35,6 +38,63 @@ class YouTubeNotConfiguredError(RuntimeError):
     account-scoped calls) — callers should surface this clearly rather than silently no-op."""
 
 
+# Which account the account-scoped calls act as.
+#
+# Multi-user: a run belongs to a user, and must upload to THAT user's channel using THAT user's
+# own Google Cloud OAuth client. Threading credentials through every node and tool call would
+# mean touching every signature in the pipeline, and a single missed one would quietly upload to
+# whatever .env holds -- publishing one person's video to somebody else's channel. A contextvar
+# set once around the run makes the default impossible to reach by accident instead, which is the
+# safer failure direction, and matches how tools.cost already scopes a run's spend.
+#
+# Falling back to settings when nothing is set keeps the single-operator paths working unchanged:
+# the scheduler, the standalone scripts/ one-offs, and this project's own channel.
+_acting_credentials: ContextVar[dict | None] = ContextVar("youtube_acting_credentials", default=None)
+
+
+@contextmanager
+def acting_for(
+    client_id: str, client_secret: str, refresh_token: str, channel_id: str | None = None
+) -> Iterator[None]:
+    """Runs the block as a specific user's YouTube account.
+
+    Set by the worker around a run, from the run owner's stored credentials. Reset on exit even
+    if the run raises, so a failure cannot leak one user's credentials into the next task picked
+    up by the same worker process.
+    """
+    token = _acting_credentials.set(
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "channel_id": channel_id or "",
+        }
+    )
+    try:
+        yield
+    finally:
+        _acting_credentials.reset(token)
+
+
+def _oauth_credentials() -> dict:
+    """The account whose channel account-scoped calls act on: the user this run belongs to, or
+    the deployment's own .env credentials when nothing is acting."""
+    acting = _acting_credentials.get()
+    if acting is not None:
+        return acting
+    settings = get_settings()
+    return {
+        "client_id": settings.youtube_client_id,
+        "client_secret": settings.youtube_client_secret,
+        "refresh_token": settings.youtube_refresh_token,
+        "channel_id": settings.youtube_channel_id,
+    }
+
+
+def acting_channel_id() -> str:
+    return _oauth_credentials().get("channel_id") or ""
+
+
 def _public_client():
     """Read-only client authenticated with just an API key (no OAuth needed)."""
     settings = get_settings()
@@ -49,13 +109,13 @@ def _oauth_client():
     """Account-scoped client (upload, analytics) authenticated via the refresh token minted by
     scripts/youtube_oauth_setup.py. google-auth transparently exchanges it for a short-lived
     access token on first use and refreshes again whenever that token expires."""
-    settings = get_settings()
+    creds = _oauth_credentials()
     missing = [
         name
         for name, value in (
-            ("YOUTUBE_CLIENT_ID", settings.youtube_client_id),
-            ("YOUTUBE_CLIENT_SECRET", settings.youtube_client_secret),
-            ("YOUTUBE_REFRESH_TOKEN", settings.youtube_refresh_token),
+            ("YOUTUBE_CLIENT_ID", creds["client_id"]),
+            ("YOUTUBE_CLIENT_SECRET", creds["client_secret"]),
+            ("YOUTUBE_REFRESH_TOKEN", creds["refresh_token"]),
         )
         if not value
     ]
@@ -67,9 +127,9 @@ def _oauth_client():
 
     credentials = Credentials(
         token=None,
-        refresh_token=settings.youtube_refresh_token,
-        client_id=settings.youtube_client_id,
-        client_secret=settings.youtube_client_secret,
+        refresh_token=creds["refresh_token"],
+        client_id=creds["client_id"],
+        client_secret=creds["client_secret"],
         token_uri="https://oauth2.googleapis.com/token",
     )
     return build("youtube", "v3", credentials=credentials, cache_discovery=False)
@@ -78,14 +138,14 @@ def _oauth_client():
 def _analytics_client():
     """Same OAuth credentials as _oauth_client(), but built against the separate youtubeAnalytics
     v2 API (its own quota pool, distinct product from the Data API v3 client above)."""
-    settings = get_settings()
+    creds = _oauth_credentials()
     missing = [
         name
         for name, value in (
-            ("YOUTUBE_CLIENT_ID", settings.youtube_client_id),
-            ("YOUTUBE_CLIENT_SECRET", settings.youtube_client_secret),
-            ("YOUTUBE_REFRESH_TOKEN", settings.youtube_refresh_token),
-            ("YOUTUBE_CHANNEL_ID", settings.youtube_channel_id),
+            ("YOUTUBE_CLIENT_ID", creds["client_id"]),
+            ("YOUTUBE_CLIENT_SECRET", creds["client_secret"]),
+            ("YOUTUBE_REFRESH_TOKEN", creds["refresh_token"]),
+            ("YOUTUBE_CHANNEL_ID", creds["channel_id"]),
         )
         if not value
     ]
@@ -97,9 +157,9 @@ def _analytics_client():
 
     credentials = Credentials(
         token=None,
-        refresh_token=settings.youtube_refresh_token,
-        client_id=settings.youtube_client_id,
-        client_secret=settings.youtube_client_secret,
+        refresh_token=creds["refresh_token"],
+        client_id=creds["client_id"],
+        client_secret=creds["client_secret"],
         token_uri="https://oauth2.googleapis.com/token",
     )
     return build("youtubeAnalytics", "v2", credentials=credentials, cache_discovery=False)

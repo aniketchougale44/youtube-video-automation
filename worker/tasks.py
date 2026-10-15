@@ -1,10 +1,14 @@
 """Celery tasks. The API and scheduler enqueue these instead of ever running the LangGraph
 pipeline inline in a request/response cycle."""
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from agents.schemas.common import RunStatus
+from core.crypto import decrypt_secret
 from core.logging import configure_logging, get_logger
 from db.base import SessionLocal
 from db.crud import (
@@ -19,11 +23,14 @@ from db.crud import (
     summarize_recent_performance,
     update_run_from_graph_result,
 )
+from db.models import UserCredential
 from graph.checkpointer import postgres_checkpointer
 from graph.feedback_graph import build_feedback_graph
 from graph.run import get_state as graph_get_state
 from graph.run import patch_state, resume_run, start_run
 from tools import cost as cost_tool
+from tools import youtube as youtube_tool
+from tools.youtube import YouTubeNotConfiguredError
 from worker.celery_app import celery_app
 
 configure_logging()
@@ -43,6 +50,45 @@ def _mark_run_failed(db: Session, run_id: str, error: BaseException) -> None:
     run.error = str(error)[:2000]
     db.add(run)
     db.commit()
+
+
+@contextmanager
+def _acting_as_run_owner(db, run) -> Iterator[None]:
+    """Runs the block as the channel owner of `run`, or as the deployment itself if it has none.
+
+    The two cases are both real and must not be confused. A run created through the web app
+    belongs to a user and has to upload to that user's channel with that user's own Google Cloud
+    client. A run created by the scheduler or a scripts/ one-off has no owner and uses the .env
+    credentials, exactly as before accounts existed.
+
+    A run whose owner has not connected a channel is failed here, before any work starts, rather
+    than twenty minutes and a full render later at the upload node. The credentials are read at
+    the last moment and never written into the graph state -- a LangGraph checkpoint is persisted
+    to Postgres and replayed on resume, so a refresh token placed in it would be stored in the
+    clear and outlive the run.
+    """
+    if run.user_id is None:
+        yield
+        return
+
+    credential = db.execute(
+        select(UserCredential).where(UserCredential.user_id == run.user_id)
+    ).scalars().first()
+
+    client_id = decrypt_secret(credential.google_client_id) if credential else ""
+    client_secret = decrypt_secret(credential.google_client_secret) if credential else ""
+    refresh_token = decrypt_secret(credential.youtube_refresh_token) if credential else ""
+
+    if not (client_id and client_secret and refresh_token):
+        raise YouTubeNotConfiguredError(
+            "this account has not connected a YouTube channel yet -- connect one in Settings "
+            "before starting a run"
+        )
+
+    with youtube_tool.acting_for(
+        client_id, client_secret, refresh_token, credential.youtube_channel_id
+    ):
+        yield
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=30, name="worker.run_pipeline_task")
@@ -75,7 +121,7 @@ def run_pipeline_task(self, run_id: str) -> dict:
         db.commit()  # release the read transaction — postgres_checkpointer() runs DDL (CREATE
         # INDEX CONCURRENTLY) on a separate connection that would otherwise block waiting on it
 
-        with cost_tool.collecting(), postgres_checkpointer() as checkpointer:
+        with _acting_as_run_owner(db, run), cost_tool.collecting(), postgres_checkpointer() as checkpointer:
             _thread_id, result = start_run(
                 checkpointer,
                 run_id=run.langgraph_thread_id,
@@ -113,7 +159,9 @@ def resume_pipeline_task(self, run_id: str, decision: dict) -> dict:
             raise ValueError(f"Run {run_id} not found")
         db.commit()  # release the read transaction before postgres_checkpointer()'s DDL runs
 
-        with postgres_checkpointer() as checkpointer:
+        # The approval resume is where upload_node actually runs, so it needs the owner's
+        # credentials just as much as the initial invocation does.
+        with _acting_as_run_owner(db, run), postgres_checkpointer() as checkpointer:
             result = resume_run(checkpointer, run.langgraph_thread_id, decision)
 
         update_run_from_graph_result(db, run, result, interrupted=False)

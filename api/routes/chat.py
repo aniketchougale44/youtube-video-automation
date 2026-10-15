@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from agents.schemas.common import RunStatus
+from api.routes.auth import require_user
 from api.routes.dashboard import _approval_rows, _build_snapshot
 from core.llm import call_structured
 from core.logging import get_logger
@@ -174,13 +175,13 @@ def _ideas_answer(db: Session) -> list[str]:
         return []
 
 
-def _pending_review(db: Session) -> dict | None:
+def _pending_review(db: Session, user_id=None) -> dict | None:
     """The oldest run parked at the approval gate, as a dashboard-style card, or None.
 
     Oldest rather than newest on purpose: if two videos are waiting, "upload it" should clear the
     queue in the order the operator saw them, not jump to whichever finished last.
     """
-    waiting = list_runs(db, status=RunStatus.AWAITING_APPROVAL)
+    waiting = list_runs(db, status=RunStatus.AWAITING_APPROVAL, user_id=user_id)
     if not waiting:
         return None
     waiting.sort(key=lambda r: r.updated_at or r.created_at)
@@ -273,7 +274,11 @@ def _no_pending_reply(intent: str) -> ChatReply:
 
 @router.post("", response_model=ChatReply)
 @router.post("/", response_model=ChatReply)
-def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatReply:
+def chat(
+    request: ChatRequest,
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> ChatReply:
     message = request.message.strip()
 
     try:
@@ -298,13 +303,13 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatReply:
         return ChatReply(reply=reply, intent=intent, suggestions=ideas)
 
     if intent == "REVIEW":
-        card = _pending_review(db)
+        card = _pending_review(db, user.id)
         if card is None:
             return _no_pending_reply(intent)
         return ChatReply(reply=_review_text(card), intent=intent, run_id=card["id"], review=card)
 
     if intent == "APPROVE":
-        card = _pending_review(db)
+        card = _pending_review(db, user.id)
         if card is None:
             return _no_pending_reply(intent)
         if _describes_new_content(message):
@@ -322,7 +327,7 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatReply:
         )
 
     if intent == "REJECT":
-        card = _pending_review(db)
+        card = _pending_review(db, user.id)
         if card is None:
             return _no_pending_reply(intent)
         _resume(card["id"], approved=False, notes=message)
@@ -336,7 +341,7 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatReply:
         )
 
     if intent == "REVISE":
-        card = _pending_review(db)
+        card = _pending_review(db, user.id)
         if card is None:
             return _no_pending_reply(intent)
         new_title = (parsed.new_title or "").strip()
@@ -376,7 +381,7 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatReply:
 
     if intent == "MAKE_TOPIC":
         topic = (parsed.topic or message)[:300]
-        run = create_run(db, user_topic=topic)
+        run = create_run(db, user_topic=topic, user_id=user.id)
         _enqueue(str(run.id))
         return ChatReply(
             reply=(
@@ -396,7 +401,7 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatReply:
                 reply="That looks too short to build a video from — paste the full story and I'll use your words.",
                 intent="HELP",
             )
-        run = create_run(db, user_script=story)
+        run = create_run(db, user_script=story, user_id=user.id)
         _enqueue(str(run.id))
         return ChatReply(
             reply=(

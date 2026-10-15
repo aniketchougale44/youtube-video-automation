@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from agents.schemas.common import RunStatus
+from api.routes.auth import current_user, require_user
 from core.logging import code_version, get_logger
 from core.settings import get_settings
 from db.base import SessionLocal, get_db
@@ -230,17 +231,29 @@ def _worker_version() -> str | None:
         return None
 
 
-def _build_snapshot(db: Session) -> dict:
-    runs = list_runs(db, limit=50)
+def _build_snapshot(db: Session, user_id=None) -> dict:
+    """`user_id=None` builds the whole-deployment view, which is what the operator dashboard and
+    the scheduler want. Anything serving a logged-in web request passes the caller's id: the
+    counts and the approval queue are filtered with it, so one account never sees -- or approves,
+    which publishes -- another account's run."""
+    runs = list_runs(db, limit=50, user_id=user_id)
     total_stages = len(PIPELINE_NODE_ORDER)
     now = datetime.now(UTC)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    status_counts = dict(db.execute(select(Run.status, func.count()).group_by(Run.status)).all())
-    cost_today = db.execute(
-        select(func.coalesce(func.sum(Cost.total_usd), 0.0)).where(Cost.created_at >= today_start)
-    ).scalar_one()
-    cost_total = db.execute(select(func.coalesce(func.sum(Cost.total_usd), 0.0))).scalar_one()
+    status_q = select(Run.status, func.count()).group_by(Run.status)
+    cost_today_q = select(func.coalesce(func.sum(Cost.total_usd), 0.0)).where(Cost.created_at >= today_start)
+    cost_total_q = select(func.coalesce(func.sum(Cost.total_usd), 0.0))
+    if user_id is not None:
+        status_q = status_q.where(Run.user_id == user_id)
+        # Costs join through the run, so a user's spend is the spend of their own runs.
+        owned = select(Run.id).where(Run.user_id == user_id).scalar_subquery()
+        cost_today_q = cost_today_q.where(Cost.run_id.in_(owned))
+        cost_total_q = cost_total_q.where(Cost.run_id.in_(owned))
+
+    status_counts = dict(db.execute(status_q).all())
+    cost_today = db.execute(cost_today_q).scalar_one()
+    cost_total = db.execute(cost_total_q).scalar_one()
 
     # Per-run spend and produced-video info for the 50 rows on screen, fetched in one query each
     # rather than per row.
@@ -267,8 +280,13 @@ def _build_snapshot(db: Session) -> dict:
             {
                 "id": str(run.id),
                 "short_id": str(run.id)[:8],
+                # Falls back to what the operator actually asked for. selected_topic is only
+                # filled once strategy_node has run, so a run started from the chat showed "—"
+                # for its first few minutes -- the stretch where someone is most likely to be
+                # watching to confirm their request landed at all.
                 "topic": (video.title if video and video.title else None)
                 or (run.selected_topic or {}).get("title")
+                or ((run.stage_status or {}).get("user_inputs") or {}).get("topic")
                 or "—",
                 "status": run.status.value,
                 "stage_label": label,
@@ -318,7 +336,7 @@ def _build_snapshot(db: Session) -> dict:
             "cost_today_usd": round(float(cost_today), 2),
             "cost_total_usd": round(float(cost_total), 2),
         },
-        "approvals": _approval_rows(db, list_runs(db, status=RunStatus.AWAITING_APPROVAL)),
+        "approvals": _approval_rows(db, list_runs(db, status=RunStatus.AWAITING_APPROVAL, user_id=user_id)),
         "runs": run_rows,
         "logs": log_rows_out,
         "script_runs": _script_runs(),
@@ -530,10 +548,24 @@ def dashboard_stream():
 
 
 @router.get("/studio")
-def studio(request: Request):
+def studio(request: Request, user=Depends(current_user), db: Session = Depends(get_db)):
     """The chat-led control surface. Renders empty and fills itself from /dashboard/snapshot, so a
-    slow database never blocks first paint."""
-    return templates.TemplateResponse(request, "studio.html", {})
+    slow database never blocks first paint.
+
+    An account with no connected channel is sent to onboarding instead: it could start a run from
+    here, but the run would render for twenty minutes and then fail at the upload with nowhere to
+    publish to.
+    """
+    from db.models import UserCredential
+
+    credential = db.execute(
+        select(UserCredential).where(UserCredential.user_id == user.id)
+    ).scalars().first()
+    from core.crypto import decrypt_secret
+
+    if not (credential and decrypt_secret(credential.youtube_refresh_token)):
+        return RedirectResponse(url="/onboarding", status_code=303)
+    return templates.TemplateResponse(request, "studio.html", {"email": user.email})
 
 
 @router.get("/channel")
@@ -559,14 +591,14 @@ def dashboard_channel():
 
 
 @router.get("/snapshot")
-def dashboard_snapshot(db: Session = Depends(get_db)):
+def dashboard_snapshot(db: Session = Depends(get_db), user=Depends(require_user)):
     """The same payload /stream pushes, as a plain GET.
 
     The studio polls this instead of holding an SSE connection: its panes update every few seconds,
     and a long-lived stream per open tab is a poor trade for that. Both read _build_snapshot, so the
     two surfaces can never disagree about run state.
     """
-    return _build_snapshot(db)
+    return _build_snapshot(db, user_id=user.id)
 
 
 # Registered after the literal paths above on purpose: run_id is typed uuid.UUID, so a request for

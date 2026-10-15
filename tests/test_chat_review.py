@@ -6,10 +6,17 @@ this endpoint means either a video publishes when the operator asked for a chang
 silently does nothing to a video about to go public, so each intent asserts on the *effect*
 (which task got handed what) rather than on the wording of the reply.
 """
+import types
+import uuid
+
 import pytest
 
 from api.routes import chat as chat_mod
 from api.routes.chat import ChatRequest, _Intent, _review_text
+
+# chat() takes the signed-in account as a dependency; calling the function directly means
+# supplying one. The id is what scopes the review queue, so it has to be a real UUID.
+_USER = types.SimpleNamespace(id=uuid.UUID("99999999-9999-9999-9999-999999999999"), email="probe@example.com")
 
 
 def _card(**over) -> dict:
@@ -62,7 +69,7 @@ def effects(monkeypatch):
 
 
 def _pending(monkeypatch, card):
-    monkeypatch.setattr(chat_mod, "_pending_review", lambda db: card)
+    monkeypatch.setattr(chat_mod, "_pending_review", lambda db, user_id=None: card)
 
 
 # --------------------------------------------------------------------- _review_text
@@ -101,7 +108,7 @@ def test_review_returns_the_card_for_the_dashboard_to_render(monkeypatch, intent
     _pending(monkeypatch, card)
     intents["parsed"] = _Intent(intent="REVIEW")
 
-    reply = chat_mod.chat(ChatRequest(message="show me the video"), db=None)
+    reply = chat_mod.chat(ChatRequest(message="show me the video"), db=None, user=_USER)
 
     assert reply.intent == "REVIEW"
     assert reply.review == card
@@ -112,7 +119,7 @@ def test_approve_resumes_the_run_as_approved(monkeypatch, intents, effects):
     _pending(monkeypatch, _card())
     intents["parsed"] = _Intent(intent="APPROVE")
 
-    reply = chat_mod.chat(ChatRequest(message="upload it"), db=None)
+    reply = chat_mod.chat(ChatRequest(message="upload it"), db=None, user=_USER)
 
     assert effects["resume"] == [("11111111-1111-1111-1111-111111111111", True, "upload it")]
     assert reply.intent == "APPROVE"
@@ -138,7 +145,7 @@ def test_a_request_describing_new_content_never_publishes(monkeypatch, intents, 
     _pending(monkeypatch, _card())
     intents["parsed"] = _Intent(intent="APPROVE")
 
-    reply = chat_mod.chat(ChatRequest(message=message), db=None)
+    reply = chat_mod.chat(ChatRequest(message=message), db=None, user=_USER)
 
     assert effects["resume"] == [], f"{message!r} must not publish"
     assert "want to be sure which you mean" in reply.reply
@@ -151,7 +158,7 @@ def test_a_bare_confirmation_still_publishes(monkeypatch, intents, effects, mess
     _pending(monkeypatch, _card())
     intents["parsed"] = _Intent(intent="APPROVE")
 
-    chat_mod.chat(ChatRequest(message=message), db=None)
+    chat_mod.chat(ChatRequest(message=message), db=None, user=_USER)
 
     assert effects["resume"] == [("11111111-1111-1111-1111-111111111111", True, message)]
 
@@ -160,7 +167,7 @@ def test_reject_resumes_the_run_as_not_approved(monkeypatch, intents, effects):
     _pending(monkeypatch, _card())
     intents["parsed"] = _Intent(intent="REJECT")
 
-    chat_mod.chat(ChatRequest(message="scrap it"), db=None)
+    chat_mod.chat(ChatRequest(message="scrap it"), db=None, user=_USER)
 
     assert effects["resume"] == [("11111111-1111-1111-1111-111111111111", False, "scrap it")]
 
@@ -176,7 +183,7 @@ def test_revise_declines_instead_of_touching_a_parked_run(monkeypatch, intents, 
     _pending(monkeypatch, _card())
     intents["parsed"] = _Intent(intent="REVISE", new_title="Ten Little Animals")
 
-    reply = chat_mod.chat(ChatRequest(message="change the title to Ten Little Animals"), db=None)
+    reply = chat_mod.chat(ChatRequest(message="change the title to Ten Little Animals"), db=None, user=_USER)
 
     assert effects["resume"] == [], "a revise must never resume the graph"
     assert effects["revise"] == [], "a revise must not write the parked checkpoint"
@@ -188,7 +195,7 @@ def test_revise_without_replacement_text_asks_instead_of_inventing_one(monkeypat
     _pending(monkeypatch, _card())
     intents["parsed"] = _Intent(intent="REVISE")
 
-    reply = chat_mod.chat(ChatRequest(message="the title is wrong"), db=None)
+    reply = chat_mod.chat(ChatRequest(message="the title is wrong"), db=None, user=_USER)
 
     assert effects["revise"] == [] and effects["resume"] == []
     assert "what should it say instead" in reply.reply
@@ -200,7 +207,7 @@ def test_decisions_are_inert_when_nothing_is_waiting(monkeypatch, intents, effec
     _pending(monkeypatch, None)
     intents["parsed"] = _Intent(intent=intent, new_title="Whatever")
 
-    reply = chat_mod.chat(ChatRequest(message="upload it"), db=None)
+    reply = chat_mod.chat(ChatRequest(message="upload it"), db=None, user=_USER)
 
     assert effects["resume"] == [] and effects["revise"] == []
     assert "Nothing is waiting" in reply.reply

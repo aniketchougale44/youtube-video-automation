@@ -72,6 +72,11 @@ class Settings(BaseSettings):
     # makes stored Google credentials unreadable, so it is backed up, not regenerated casually.
     # Generate with: python -c "import secrets; print(secrets.token_urlsafe(48))"
     app_secret_key: str = ""
+    # Public origin, e.g. https://studio.example.com. Used to build the OAuth redirect URI users
+    # register in their own Google Cloud project; behind a proxy the app sees an internal host,
+    # which would send people to an address that does not resolve for them. Empty = derive from
+    # the request, which is correct for local development.
+    app_base_url: str = ""
     deepseek_api_key: str = ""  # platform.deepseek.com -- OpenAI-compatible, so no extra dependency
     # deepseek-chat (V3), deliberately not deepseek-reasoner (R1): every agent node here goes
     # through with_structured_output(), and the reasoner does not support function calling or
