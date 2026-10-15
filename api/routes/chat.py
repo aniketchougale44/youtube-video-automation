@@ -89,7 +89,12 @@ _INTENT_SYSTEM = (
     "REVIEW, 'upload it' / 'publish' / 'yes, send it' / 'looks good' is APPROVE, 'scrap it' / 'no, "
     "cancel' is REJECT, and anything asking for a different title or description is REVISE. For "
     "REVISE, put the replacement text in new_title/new_description only when the operator actually "
-    "dictated it -- leave them empty when they just said something was wrong with it."
+    "dictated it -- leave them empty when they just said something was wrong with it.\n"
+    "APPROVE is ONLY a bare confirmation of something that already exists -- it refers back ('it', "
+    "'that one', 'this'), and names no subject matter. The verb alone decides nothing: 'upload a "
+    "story for kids' and 'upload a video about dinosaurs' describe something that does not exist "
+    "yet, so they are MAKE_TOPIC, not APPROVE. If the message says what the video should be ABOUT, "
+    "it is a request to make one."
 )
 
 
@@ -219,6 +224,43 @@ def _review_text(card: dict) -> str:
     return "\n\n".join(parts)
 
 
+# An approval publishes to YouTube, so it may not rest on the classifier reading a sentence the
+# way a person would. "upload a video of story for children" is a request to MAKE something, but
+# it opens with the same verb as "upload it" and was observed classifying as APPROVE -- which
+# would have published whatever was parked instead of building the story that was asked for.
+#
+# The rule below is deliberately blunt: a real approval is a short reference to something that
+# already exists. Anything describing subject matter is not a confirmation, whatever the
+# classifier decided. False positives here cost one clarifying question; a false negative costs
+# an unwanted publish.
+_CONFIRMATION_MAX_WORDS = 8
+_NEW_CONTENT_HINTS = (
+    "story", "video of", "video about", "make ", "create", "another", "new ", "about ",
+)
+
+
+def _describes_new_content(message: str) -> bool:
+    low = message.lower()
+    if len(low.split()) > _CONFIRMATION_MAX_WORDS:
+        return True
+    return any(hint in low for hint in _NEW_CONTENT_HINTS)
+
+
+def _ambiguous_reply(card: dict, message: str) -> ChatReply:
+    return ChatReply(
+        reply=(
+            f"I want to be sure which you mean, because one of these publishes to YouTube.\n\n"
+            f"**{card['title']}** is finished and waiting. Did you mean:\n\n"
+            f"- **publish that one** — say _upload it_ or _publish it_\n"
+            f"- **make a new video** — say _make a video about …_ with the subject\n\n"
+            f"I haven't done either yet."
+        ),
+        intent="HELP",
+        run_id=card["id"],
+        review=card,
+    )
+
+
 def _no_pending_reply(intent: str) -> ChatReply:
     return ChatReply(
         reply=(
@@ -265,6 +307,9 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatReply:
         card = _pending_review(db)
         if card is None:
             return _no_pending_reply(intent)
+        if _describes_new_content(message):
+            logger.info("chat.approve_ambiguous", run_id=card["id"], chars=len(message))
+            return _ambiguous_reply(card, message)
         _resume(card["id"], approved=True, notes=message)
         return ChatReply(
             reply=(

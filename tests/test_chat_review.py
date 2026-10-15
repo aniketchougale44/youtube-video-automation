@@ -118,6 +118,44 @@ def test_approve_resumes_the_run_as_approved(monkeypatch, intents, effects):
     assert reply.intent == "APPROVE"
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "upload a video of story for children",  # observed classifying as APPROVE
+        "upload a story for kids",
+        "upload a video about dinosaurs",
+        "publish a new video about counting to ten for toddlers",
+    ],
+)
+def test_a_request_describing_new_content_never_publishes(monkeypatch, intents, effects, message):
+    """The guard that stops "upload a story for kids" publishing the video already parked.
+
+    These all open with a publish verb and were seen reaching APPROVE. Each one describes
+    something that does not exist yet, so the only acceptable outcome is to ask -- an approval
+    that rests on the classifier parsing a sentence correctly is an unwanted upload waiting to
+    happen.
+    """
+    _pending(monkeypatch, _card())
+    intents["parsed"] = _Intent(intent="APPROVE")
+
+    reply = chat_mod.chat(ChatRequest(message=message), db=None)
+
+    assert effects["resume"] == [], f"{message!r} must not publish"
+    assert "want to be sure which you mean" in reply.reply
+    assert reply.review is not None
+
+
+@pytest.mark.parametrize("message", ["upload it", "publish it", "yes", "looks good, send it", "ship it"])
+def test_a_bare_confirmation_still_publishes(monkeypatch, intents, effects, message):
+    """The guard must not make approving tedious -- a short confirmation goes straight through."""
+    _pending(monkeypatch, _card())
+    intents["parsed"] = _Intent(intent="APPROVE")
+
+    chat_mod.chat(ChatRequest(message=message), db=None)
+
+    assert effects["resume"] == [("11111111-1111-1111-1111-111111111111", True, message)]
+
+
 def test_reject_resumes_the_run_as_not_approved(monkeypatch, intents, effects):
     _pending(monkeypatch, _card())
     intents["parsed"] = _Intent(intent="REJECT")
